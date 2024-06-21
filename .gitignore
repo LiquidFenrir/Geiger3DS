@@ -1,0 +1,5 @@
+*.exe
+capstone-build/
+*.bin
+*.elf
+*.txt
