@@ -3,3 +3,8 @@ capstone-build/
 *.bin
 *.elf
 *.txt
+*.pdf
+*.src.c
+*.lab.arm.c
+*.lab.thumb.c
+capstone/
