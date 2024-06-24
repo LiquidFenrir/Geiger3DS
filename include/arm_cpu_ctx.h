@@ -166,7 +166,9 @@ typedef struct arm_cpu_ctx {
     uint32_t fpexc;
     uint32_t fpsid;
     uint32_t base_addr;
+#if ARM_RUNTIME_PC_OFFSET
     uint32_t pc_offset;
+#endif
     uint32_t thread_id;
     // [0, ..., N)
     uint32_t cpu_id;
@@ -228,20 +230,32 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_compute_thumb_off
 static inline void ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_STATUS_T_SET(arm_cpu_ctx* const ctx, const uint32_t new_flag)
 {
     ctx->cpsr = ((ctx->cpsr) & ~(1u << 5)) | (new_flag << 5);
+#if ARM_RUNTIME_PC_OFFSET
     if(new_flag) // thumb
         ctx->pc_offset = 4;
     else // arm
         ctx->pc_offset = 8;
+#endif
 }
-static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_update_pc(volatile arm_cpu_ctx* const ctx, const uint32_t new_pc)
+
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_update_pc(volatile arm_cpu_ctx* const ctx, const uint32_t new_pc
+#if !ARM_RUNTIME_PC_OFFSET
+, const uint32_t pc_offset
+#endif
+)
 {
     // slow but works
     // ctx->pc = new_pc + (ARM_CPU_STATUS_T(ctx) ? 4 : 8);
     // faster ?
     // ctx->pc = new_pc + (((ARM_CPU_STATUS_T_GET(ctx) ^ (1u << 5)) + (1u << 5)) >> 3);
     // even better ? at least way less instructions than either
-    ctx->pc = new_pc + ctx->pc_offset;
+    ctx->pc = new_pc +
+#if ARM_RUNTIME_PC_OFFSET
+    ctx->
+#endif
+    pc_offset;
 }
+
 static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_instr_svc(arm_cpu_ctx* const ctx, const int64_t svc_id)
 {
     __asm__ __volatile__ ("int3"

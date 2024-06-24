@@ -6,12 +6,16 @@ extern "C" {
 #include <cstring>
 #include <cstdlib>
 #include <vector>
-#include <queue>
 #include <memory>
 #include <string>
 #include <span>
+#include <set>
 #include <map>
 #include <format>
+#include <algorithm>
+
+#define safe_fprintf(ptr, ...) do { if(ptr) fprintf(ptr, __VA_ARGS__); } while(0)
+#define safe_fwrite(a, b, c, ptr) do { if(ptr) fwrite(a, b, c, ptr); } while(0)
 
 using u32 = std::uint32_t;
 using u8 = std::uint8_t;
@@ -35,6 +39,7 @@ using FILE_ptr = std::unique_ptr<FILE, FILE_deleter>;
 struct ProcessDisasmContext {
     const u32 start_addr;
     const std::span<const u8> start_code;
+    const bool allow_thumb;
 
     // mapping goes
     // ((4x) / 4) * 3 -> ARM mapping
@@ -42,8 +47,19 @@ struct ProcessDisasmContext {
     // ((4x + 3) / 4) * 3 + 2 -> THUMB mapping (second)
     struct MappingValue {
         bool visited{false};
-        bool want_label{false};
-        bool have_label{false};
+        bool tried{false};
+        bool jumptable_entry{false};
+        bool is_unrecover_branch{false};
+        bool is_function_start{false};
+        bool failed_guess{false};
+        u32 has_adr_start{0};
+
+        void reset()
+        {
+            visited = false;
+            is_unrecover_branch = false;
+            is_function_start = false;
+        }
     };
     std::vector<MappingValue> analyzed{(start_code.size() / 4) * 3};
 
@@ -65,12 +81,102 @@ struct ProcessDisasmContext {
         else
             return instr_offset * 3;
     }
-    auto& get_mapping(const u32 addr)
+    MappingValue& get_mapping(const u32 addr)
     {
-        return analyzed[get_mapping_index(addr)];
+        const auto mapping_index = get_mapping_index(addr);
+        if(mapping_index >= analyzed.size())
+        {
+            fprintf(stderr, "mapping index for addr 0x%08x %d\n", addr, mapping_index);
+        }
+        return analyzed[mapping_index];
+    }
+    struct BranchDestination {
+        u32 addr;
+        bool is_function_start;
+        bool is_thumb;
+        bool ignore_previous;
+        ARMCC_CondCodes with_condcode{ARMCC_CondCodes::ARMCC_AL};
+        bool is_guess{false};
+
+        bool operator<(const BranchDestination& other) const
+        {
+            return (!is_guess && other.is_guess) || (!is_thumb && other.is_thumb) || (
+                (!is_guess && addr < other.addr)
+                || 
+                (is_guess && !(addr < other.addr)) // guesses are stored in reverse order
+            );
+        }
+    };
+    // always sorted like <arm sure> <thumb sure> <arm guess> <thumb guess>
+    std::set<BranchDestination> branches{};
+    std::vector<BranchDestination> branches_temp_list{};
+    u32 initial_skip_offset{0};
+    void add_branch(BranchDestination dest)
+    {
+        branches_temp_list.push_back(dest);
+    }
+    void add_guess_branch(BranchDestination dest)
+    {
+        dest.is_guess = true;
+        add_branch(dest);
+    }
+    void commit_branches()
+    {
+        for(auto dest : branches_temp_list)
+        {
+            if(dest.is_thumb || (dest.addr & 1))
+            {
+                dest.addr |= 1;
+                dest.is_thumb = true;
+            }
+
+            printf("Adding %s branch to 0x%08x as func? %d as thumb? %d\n", dest.is_guess ? "guess" : "", dest.addr, (int)dest.is_function_start, (int)dest.is_thumb);
+
+            if(dest.is_thumb && !allow_thumb)
+            {
+                // printf("DISABLED\n");
+                continue;
+            }
+
+            if(const auto& mapping = get_mapping(dest.addr); mapping.visited || mapping.tried)
+            {
+                printf("ALREADYVISITED\n");
+                continue;
+            }
+
+            auto [it, inserted] = branches.insert(dest);
+            // printf("INSERT: %d\n", (int)inserted);
+        }
+        branches_temp_list.clear();
+    }
+    void discard_branches()
+    {
+        branches_temp_list.clear();
     }
 
-    std::queue<u32> branches{};
+    bool find_temp_branch(const auto& pred)
+    {
+        return std::find_if(branches_temp_list.cbegin(), branches_temp_list.cend(), pred) != branches_temp_list.cend();
+    }
+
+    // returns the next branch, if it matches de predicate
+    // if it does not, it is left in the structure
+    std::optional<BranchDestination> get_next_branch_if(const auto& pred)
+    {
+        if(branches.empty())
+            return std::nullopt;
+        const auto it = branches.begin();
+        if(!pred(*it))
+            return std::nullopt;
+
+        const auto dest = *it;
+        branches.erase(it);
+        return dest;
+    }
+    std::optional<BranchDestination> get_next_branch()
+    {
+        return get_next_branch_if([]([[maybe_unused]] const auto&  x) { return true; });
+    }
 
     struct Handle_csh {
         csh handle;
@@ -90,6 +196,7 @@ struct ProcessDisasmContext {
     cs_insn_ptr insn_arm{cs_malloc(handle_arm.handle)};
     cs_insn_ptr insn_thumb{cs_malloc(handle_thumb.handle)};
     std::map<uint64_t, std::string> insn_list{};
+    std::vector<decltype(insn_list)::value_type> insn_temp_list{};
 
     struct State {
         csh* handle;
@@ -101,21 +208,21 @@ struct ProcessDisasmContext {
 };
 
 #define INSN_APPEND_LDREX_TYPE(c_ldr_type) \
-    result += std::format("ARM_CPU_PERFORM_LDREX_ALL(ctx, ctx->{}, " #c_ldr_type ", ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_LDREX_ALL(ctx, ctx->{}, " #c_ldr_type ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.base));
 
 #define INSN_APPEND_LDREXD() \
-    result += std::format("ARM_CPU_PERFORM_LDREXD(ctx, ctx->{}, ctx->{}, ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_LDREXD(ctx, ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.base));
 
 #define INSN_APPEND_STREX_TYPE(c_str_type, c_str_and) \
-    result += std::format("ARM_CPU_PERFORM_STREX_ALL(ctx, ctx->{}, ctx->{}, " #c_str_type ", " #c_str_and ", ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_STREX_ALL(ctx, ctx->{}, ctx->{}, " #c_str_type ", " #c_str_and ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.base));
 
 #define INSN_APPEND_STREXD() \
-    result += std::format("ARM_CPU_PERFORM_STREXD(ctx, ctx->{}, ctx->{}, ctx->{}, ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_STREXD(ctx, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[3].mem.base));
 
@@ -139,7 +246,7 @@ struct ProcessDisasmContext {
             result += std::format("{}", insn.detail->arm.operands[1].shift.value); \
         } \
     } \
-    result += std::format("), {}, {});\n", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
+    result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
 
 #define INSN_APPEND_STR_TYPE(c_str_type, c_str_and) \
     result += std::format("ARM_CPU_PERFORM_STR_ALL(ctx, ctx->{}, " #c_str_type ", " #c_str_and ", ctx->{}, ", \
@@ -161,7 +268,18 @@ struct ProcessDisasmContext {
             result += std::format("{}", insn.detail->arm.operands[1].shift.value); \
         } \
     } \
-    result += std::format("), {}, {});\n", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
+    result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
+
+#define INSN_APPEND_POP(c_ldm_type, c_ldm_init, c_ldm_step, c_ldm_final) \
+    result += std::format("ARM_CPU_PERFORM_LDM_ALL(ctx, ctx->sp, 1, {}, {}, {}, ", c_ldm_init, c_ldm_step, c_ldm_final); \
+    { \
+    bool have_pc_in_list = false; \
+    for(int reg_idx = 0; reg_idx < insn.detail->arm.op_count; ++reg_idx) { \
+        result += std::format("(" #c_ldm_type ", {}, {})", reg_idx, cs_reg_name(*state.handle, insn.detail->arm.operands[reg_idx].reg)); \
+        if(insn.detail->arm.operands[reg_idx].reg == arm_reg::ARM_REG_PC) have_pc_in_list = true; \
+    } \
+    result += std::format(", {});", (int)have_pc_in_list); \
+    }
 
 #define INSN_APPEND_LDM(c_ldm_type, c_ldm_init, c_ldm_step, c_ldm_final) \
     result += std::format("ARM_CPU_PERFORM_LDM_ALL(ctx, ctx->{}, {}, {}, {}, {}, ", \
@@ -172,15 +290,21 @@ struct ProcessDisasmContext {
         result += std::format("(" #c_ldm_type ", {}, {})", reg_idx - 1, cs_reg_name(*state.handle, insn.detail->arm.operands[reg_idx].reg)); \
         if(insn.detail->arm.operands[reg_idx].reg == arm_reg::ARM_REG_PC) have_pc_in_list = true; \
     } \
-    result += std::format(", {});\n", (int)have_pc_in_list); \
+    result += std::format(", {});", (int)have_pc_in_list); \
     }
+
+#define INSN_APPEND_PUSH(c_stm_type, c_stm_init, c_stm_step, c_stm_final) \
+    result += std::format("ARM_CPU_PERFORM_STM_ALL(ctx, ctx->sp, 1, {}, {}, {}, ", c_stm_init, c_stm_step, c_stm_final); \
+    for(int reg_idx = 0; reg_idx < insn.detail->arm.op_count; ++reg_idx) \
+        result += std::format("(" #c_stm_type ", {}, {})", reg_idx, cs_reg_name(*state.handle, insn.detail->arm.operands[reg_idx].reg)); \
+    result += ");";
 
 #define INSN_APPEND_STM(c_stm_type, c_stm_init, c_stm_step, c_stm_final) \
     result += std::format("ARM_CPU_PERFORM_STM_ALL(ctx, ctx->{}, {}, {}, {}, {}, ", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), (int)insn.detail->writeback, c_stm_init, c_stm_step, c_stm_final); \
     for(int reg_idx = 1; reg_idx < insn.detail->arm.op_count; ++reg_idx) \
         result += std::format("(" #c_stm_type ", {}, {})", reg_idx - 1, cs_reg_name(*state.handle, insn.detail->arm.operands[reg_idx].reg)); \
-    result += ");\n";
+    result += ");";
 
 #define INSN_APPEND_operand2(c_op_updates_flags, c_op_idx) \
     if(insn.detail->arm.operands[c_op_idx].type == arm_op_type::ARM_OP_REG) switch(insn.detail->arm.operands[c_op_idx].shift.type) { \
@@ -208,19 +332,19 @@ struct ProcessDisasmContext {
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags); \
         break; \
     case arm_shifter::ARM_SFT_ASR_REG: \
-        result += std::format("ARM_CPU_PERFORM_ASR_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("ARM_CPU_PERFORM_asr_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     case arm_shifter::ARM_SFT_LSL_REG: \
-        result += std::format("ARM_CPU_PERFORM_LSL_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("ARM_CPU_PERFORM_lsl_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     case arm_shifter::ARM_SFT_LSR_REG: \
-        result += std::format("ARM_CPU_PERFORM_LSR_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("ARM_CPU_PERFORM_lsr_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     case arm_shifter::ARM_SFT_ROR_REG: \
-        result += std::format("ARM_CPU_PERFORM_ROR_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("ARM_CPU_PERFORM_ror_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     default: \
@@ -229,36 +353,36 @@ struct ProcessDisasmContext {
     } else if(insn.detail->arm.operands[c_op_idx].type == arm_op_type::ARM_OP_IMM) result += std::format("{}", insn.detail->arm.operands[c_op_idx].imm);
 
 #define INSN_APPEND_XT_TYPE(c_basic_type, c_extend_type, c_and_mask) \
-    result += std::format("ARM_CPU_PERFORM_XT(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ");\n", \
+    result += std::format("ARM_CPU_PERFORM_XT(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ");", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     (insn.detail->arm.operands[1].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0));
 
 #define INSN_APPEND_XTA_TYPE(c_basic_type, c_extend_type, c_and_mask) \
-    result += std::format("ARM_CPU_PERFORM_XTA(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ", ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_XTA(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg), \
     (insn.detail->arm.operands[2].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
 
 #define INSN_APPEND_XTB16_TYPE(c_basic_type, c_extend_type) \
-    result += std::format("ARM_CPU_PERFORM_XTB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ");\n", \
+    result += std::format("ARM_CPU_PERFORM_XTB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ");", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     (insn.detail->arm.operands[1].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0));
 
 #define INSN_APPEND_XTAB16_TYPE(c_basic_type, c_extend_type) \
-    result += std::format("ARM_CPU_PERFORM_XTAB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ", ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_XTAB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg), \
     (insn.detail->arm.operands[2].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
 
 #define INSN_APPEND_MUL() \
-    result += std::format("ARM_CPU_PERFORM_MUL(ctx, {}, ctx->{}, ctx->{}, ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_MUL(ctx, {}, ctx->{}, ctx->{}, ctx->{});", \
     (int)insn.detail->arm.update_flags, \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
 
 #define INSN_APPEND_MLA() \
-    result += std::format("ARM_CPU_PERFORM_MLA(ctx, {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_MLA(ctx, {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
     (int)insn.detail->arm.update_flags, \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
@@ -266,7 +390,7 @@ struct ProcessDisasmContext {
     cs_reg_name(*state.handle, insn.detail->arm.operands[3].reg));
 
 #define INSN_APPEND_MUL_MLA_LONG_TYPE(c_mul_mla_kind, c_base_type) \
-    result += std::format("ARM_CPU_PERFORM_x" #c_mul_mla_kind "L(ctx, " #c_base_type ", {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_x" #c_mul_mla_kind "L(ctx, " #c_base_type ", {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
     (int)insn.detail->arm.update_flags, \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
@@ -274,51 +398,195 @@ struct ProcessDisasmContext {
     cs_reg_name(*state.handle, insn.detail->arm.operands[3].reg));
 
 #define INSN_APPEND_SIMD_N_TYPE(c_base_type, c_bitness, c_operation) \
-    result += std::format("ARM_CPU_PERFORM_SIMD_" #c_bitness "_TYPE(ctx, " #c_base_type ", " #c_operation ", ctx->{}, ctx->{}, ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_SIMD_" #c_bitness "_TYPE(ctx, " #c_base_type ", " #c_operation ", ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
     
 #define INSN_APPEND_SIMD_16_DUAL_TYPE(c_base_type, c_operation_top, c_operation_bottom) \
-    result += std::format("ARM_CPU_PERFORM_SIMD_16_DUAL_TYPE(ctx, " #c_base_type ", " #c_operation_top ", " #c_operation_bottom ", ctx->{}, ctx->{}, ctx->{});\n", \
+    result += std::format("ARM_CPU_PERFORM_SIMD_16_DUAL_TYPE(ctx, " #c_base_type ", " #c_operation_top ", " #c_operation_bottom ", ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
 
-static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
+static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::BranchDestination& entry)
 {
     bool iter_success = false;
-    const bool in_thumb_mode = addr & 1;
+    const bool in_thumb_mode = entry.is_thumb;
     ProcessDisasmContext::State state{
         .handle = in_thumb_mode ? &ctx.handle_thumb.handle : &ctx.handle_arm.handle,
-        .code = ctx.start_code.data() + ctx.get_offset(addr & ~1),
-        .code_size = ctx.start_code.size() - ctx.get_offset(addr & ~1),
-        .address = addr & ~1,
+        .code = ctx.start_code.data() + ctx.get_offset(entry.addr & ~1),
+        .code_size = ctx.start_code.size() - ctx.get_offset(entry.addr & ~1),
+        .address = entry.addr & ~1,
         .insn = in_thumb_mode ? ctx.insn_thumb.get() : ctx.insn_arm.get(),
     };
 
     const char* label_kind = in_thumb_mode ? "THUMB" : "ARM";
-    printf("Entering chunk %08x in %s mode \n", addr, label_kind);
+    printf("Entering chunk %08x in %s mode \n", entry.addr & ~1, label_kind);
 
-    bool last_cmp = false;
+    int last_cmp = 0;
     int last_cmp_reg = arm_reg::ARM_REG_INVALID;
     int64_t last_cmp_imm = 0;
+    int last_adr_reg = arm_reg::ARM_REG_INVALID;
+    int64_t last_adr_value = 0;
+    u32 last_branch_addr = -1;
+    ARMCC_CondCodes last_branch_condcode = ARMCC_AL;
+
     // pair: value, known unchanged
-    // std::map<arm_reg, std::pair<uint32_t, bool>> last_known_reg_value;
+    std::map<arm_reg, uint32_t> last_known_reg_from_pc_value;
 
     while((iter_success = cs_disasm_iter(*state.handle, &state.code, &state.code_size, &state.address, state.insn)))
     {
         const auto& insn = *state.insn;
         bool uncond_branch = false;
-        auto& mapping = ctx.get_mapping(insn.address + (addr & 1));
+        const u32 active_address = insn.address + (in_thumb_mode ? 1 : 0);
+        auto& mapping = ctx.get_mapping(active_address);
+        const auto arm_mapping = ctx.get_mapping(active_address & ~3u);
+
+        u32 prev_addr_arm = 0;
+        u32 self_value_arm = 0;
+        std::optional<ProcessDisasmContext::MappingValue> previous_mapping;
+        if(!entry.ignore_previous && active_address == entry.addr)
+        {
+            if((active_address & 3) == 3)
+            {
+                prev_addr_arm = active_address - 7;
+            }
+            else if((active_address & 1) == 1)
+            {
+                prev_addr_arm = active_address - 5;
+            }
+            else
+            {
+                prev_addr_arm = active_address - 4;
+            }
+            std::memcpy(&self_value_arm, ctx.start_code.data() + ctx.get_offset(prev_addr_arm + 4), sizeof(u32));
+        }
+
+        if(prev_addr_arm && prev_addr_arm >= ctx.start_addr && prev_addr_arm < ctx.start_addr + ctx.start_code.size())
+        {
+            printf("Checking previous instruction at 0x%08x\n", prev_addr_arm);
+            previous_mapping = ctx.get_mapping(prev_addr_arm);
+            printf("previous: %d %d %d\n", previous_mapping->visited, previous_mapping->tried, previous_mapping->is_unrecover_branch);
+        }
 
         // already passed the instruction, thus the chunk
-        if(mapping.visited)
+        // also check if this thumb was visited as arm, at worst a double check of the same value
+        // aka don't support polyglot code
+        /* if(active_address != entry.addr && entry.is_guess && (mapping.is_function_start || arm_mapping.is_function_start))
         {
-            printf("already visited\n");
+            printf("reached a function start from a guess: %08x\n", (u32)insn.address);
+            printf("we were in a constant pool. discard.\n");
+            iter_success = false;
+            mapping.failed_guess = true;
             break;
         }
+        else */ if(active_address == entry.addr && entry.is_guess && !entry.is_function_start && previous_mapping && previous_mapping->failed_guess)
+        {
+            printf("non-function guess follows a failed guess: %08x\n", (u32)insn.address);
+            printf("assume we were in a constant pool. discard.\n");
+            iter_success = false;
+            mapping.failed_guess = true;
+            break;
+        }
+        else if(active_address == entry.addr && (mapping.visited || arm_mapping.visited))
+        {
+            printf("already visited: %08x\n", (u32)(insn.address & ~3u));
+            break;
+        }
+        
+        if(cs_insn_group(*state.handle, &insn, arm_insn_group::ARM_FEATURE_IsThumb2))
+        {
+            // we don't have thumb2 in v6k
+            printf("thumb2 -> invalid\n");
+            iter_success = false;
+            mapping.failed_guess = true;
+            break;
+        }
+        else if(active_address == entry.addr && (entry.is_function_start || entry.is_guess || (previous_mapping && previous_mapping->visited && previous_mapping->is_unrecover_branch)))
+        {
+            bool invalid_function_start = false;
+            if(self_value_arm == 0xe320f000 && in_thumb_mode)
+            {
+                // part of a nop, f000 isn't a valid thumb instruction
+                invalid_function_start = true;
+            }
+            else if(insn.detail->arm.cc == ARMCC_AL || insn.detail->arm.cc == ARMCC_UNDEF)
+            {
+                /*
+                if(insn.is_alias) switch(insn.alias_id)
+                {
+                case arm_insn::ARM_INS_ALIAS_PUSH:
+                case arm_insn::ARM_INS_ALIAS_VPUSH:
+                case arm_insn::ARM_INS_ALIAS_POP:
+                case arm_insn::ARM_INS_ALIAS_VPOP:
+                    break;
+                default:
+                    // any other = bad
+                    invalid_function_start = true;
+                    break;
+                }
+                else switch(insn.id)
+                {
+                case arm_insn::ARM_INS_LDM: // push
+                case arm_insn::ARM_INS_LDMIB:
+                case arm_insn::ARM_INS_LDMDA:
+                case arm_insn::ARM_INS_LDMDB:
+                case arm_insn::ARM_INS_VLDMIA:
+                case arm_insn::ARM_INS_VLDMDB:
+                case arm_insn::ARM_INS_LDR:
+                case arm_insn::ARM_INS_LDRH:
+                case arm_insn::ARM_INS_LDRB:
+                case arm_insn::ARM_INS_LDRSH:
+                case arm_insn::ARM_INS_LDRSB:
+                case arm_insn::ARM_INS_LDRD:
+                case arm_insn::ARM_INS_VLDR:
+                case arm_insn::ARM_INS_STM:
+                case arm_insn::ARM_INS_STMIB:
+                case arm_insn::ARM_INS_STMDA:
+                case arm_insn::ARM_INS_STMDB:
+                case arm_insn::ARM_INS_VSTMIA:
+                case arm_insn::ARM_INS_VSTMDB:
+                case arm_insn::ARM_INS_STR:
+                case arm_insn::ARM_INS_STRH:
+                case arm_insn::ARM_INS_STRB:
+                case arm_insn::ARM_INS_STRD:
+                case arm_insn::ARM_INS_MOV:
+                case arm_insn::ARM_INS_VMOV:
+                case arm_insn::ARM_INS_BX: // return directly
+                case arm_insn::ARM_INS_B: // go elsewhere directly
+                    break;
+                default:
+                    // any other = bad
+                    invalid_function_start = true;
+                    break;
+                }
+                */
+            }
+            else
+            {
+                printf("First instruction condition is nonsense\n");
+                invalid_function_start = true;
+            }
+
+            if(invalid_function_start)
+            {
+                printf("function start detection failed, skip chunk\n");
+                printf("FAIL REASON: 0x%08llx (%u/%llu): %s %s\n", insn.address, insn.id, insn.alias_id, insn.mnemonic, insn.op_str);
+                mapping.failed_guess = true;
+                break;
+            }
+        }
         mapping.visited = true;
+        if(active_address == entry.addr && entry.is_function_start)
+        {
+            mapping.is_function_start = true;
+        }
+
+        if(insn.address == ctx.start_addr && insn.id == arm_insn::ARM_INS_B)
+        {
+            ctx.initial_skip_offset = insn.address - ctx.start_addr;
+        }
 
         printf("0x%08llx (%u/%llu): %s %s\n", insn.address, insn.id, insn.alias_id, insn.mnemonic, insn.op_str);
         if(insn.detail->arm.cc == ARMCC_UNDEF)
@@ -327,11 +595,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         }
 
         std::string result;
-        result += std::format("arm_cpu_update_pc(ctx, 0x{:08x});\n", insn.address);
+        result += std::format("arm_cpu_update_pc(ctx, 0x{:08x}, {});\n", insn.address, in_thumb_mode ? 4 : 8);
         if(insn.detail->arm.cc != ARMCC_AL && insn.detail->arm.cc != ARMCC_UNDEF)
         {
             result += std::format("if(arm_cpu_check_cc(ctx, arm_cpu_cc_{}))", ARMCondCodeToString(insn.detail->arm.cc));
             result += " {\n";
+        }
+
+        if(insn.detail->arm.update_flags)
+        {
+            last_branch_condcode = ARMCC_AL;
         }
 
         bool got_okay_can_skip = false;
@@ -339,21 +612,53 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         {
         case ARM_INS_ALIAS_POP: {
             // beyond this is code recognition
-            for(int i = 1; i < insn.detail->arm.op_count; ++i)
+            for(int i = 0; i < insn.detail->arm.op_count; ++i)
             {
                 if(insn.detail->arm.operands[i].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[i].reg == arm_reg::ARM_REG_PC)
                 {
                     if(insn.detail->arm.cc == ARMCC_AL)
                     {
                         uncond_branch = true;
+                        mapping.is_unrecover_branch = true;
                     }
                     else
                     {
-                        printf("load to PC but not unconditional\n");
+                        printf("load to PC but not unconditional?\n");
                     }
                     break;
                 }
             }
+            INSN_APPEND_POP(uint32_t, 0, 4, 4 * (insn.detail->arm.op_count));
+            got_okay_can_skip = true;
+            break;
+        }
+        case ARM_INS_ALIAS_VPOP: {
+            if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_D0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15)
+            {
+                INSN_APPEND_POP(double, 0, 8, 8 * (insn.detail->arm.op_count));
+            }
+            else if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_S31)
+            {
+                INSN_APPEND_POP(float, 0, 4, 4 * (insn.detail->arm.op_count));
+            }
+            got_okay_can_skip = true;
+            break;
+        }
+        case ARM_INS_ALIAS_PUSH: {
+            INSN_APPEND_PUSH(uint32_t, 0, 4, 4 * (insn.detail->arm.op_count));
+            got_okay_can_skip = true;
+            break;
+        }
+        case ARM_INS_ALIAS_VPUSH: {
+            if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_D0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15)
+            {
+                INSN_APPEND_PUSH(double, 0, 8, 8 * (insn.detail->arm.op_count));
+            }
+            else if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_S31)
+            {
+                INSN_APPEND_PUSH(float, 0, 4, 4 * (insn.detail->arm.op_count));
+            }
+            got_okay_can_skip = true;
             break;
         }
         case ARM_INS_ALIAS_NOP: {
@@ -365,42 +670,70 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         }
         }
 
-        const bool last_cmp_used = last_cmp;
-        last_cmp = false;
+        const int last_cmp_used = last_cmp;
+        if(last_cmp > 0)
+            --last_cmp;
+
+        const int last_adr_reg_used = last_adr_reg;
+        last_adr_reg = arm_reg::ARM_REG_INVALID;
         if(!got_okay_can_skip) switch(insn.id)
         {
         case ARM_INS_B: {
-            const auto branch_target = insn.detail->arm.operands[0].imm;
-            result += std::format("ARM_CPU_PERFORM_{}_B(ctx, 0x{:08x});\n", label_kind, branch_target);
-            ctx.branches.push(branch_target);
+            const uint64_t branch_target = insn.detail->arm.operands[0].imm;
+            if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
+            {
+                result += std::format("ARM_CPU_PERFORM_{}_B(ctx, 0x{:08x});", label_kind, branch_target);
+                ctx.add_branch({(u32)branch_target, false, in_thumb_mode, true, insn.detail->arm.cc});
+            }
+            // if unconditional, or the opposite of the last conditional branch without a flag setting inbetween, assume return
             if(insn.detail->arm.cc == ARMCC_AL)
+            {
                 uncond_branch = true;
+                mapping.is_unrecover_branch = true;
+            }
+            else if((insn.detail->arm.cc ^ 1) == last_branch_condcode)
+            {
+                // if there is a jump to this with a condcode opposite and no flag change, it cannot be "unconditional"
+                if(!ctx.find_temp_branch([&](const ProcessDisasmContext::BranchDestination& dest) {
+                    return last_branch_addr <= dest.addr && dest.addr <= active_address && (insn.detail->arm.cc ^ 1) == last_branch_condcode;
+                }))
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
+            last_branch_condcode = insn.detail->arm.cc;
+            last_branch_addr = active_address;
             // last_known_reg_value.clear();
             break;
         }
         case ARM_INS_BX: {
             const auto branch_target_reg = insn.detail->arm.operands[0].reg;
-            result += std::format("ARM_CPU_PERFORM_BX(ctx, ctx->{});\n", cs_reg_name(*state.handle, branch_target_reg));
+            result += std::format("ARM_CPU_PERFORM_BX(ctx, ctx->{});", cs_reg_name(*state.handle, branch_target_reg));
             // if(auto it = last_known_reg_value.find((arm_reg)branch_target_reg); it != last_known_reg_value.end() && it->second.second)
             // {
             //     const auto value = it->second.first;
             //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.start_code.size())
             //     {
             //         printf("Identified indirect jump to %08x\n", value);
-            //         ctx.branches.push(value);
+            //         ctx.add_branch(value);
             //     }
             // }
-            if(insn.detail->arm.cc == ARMCC_AL)
+            if(insn.detail->arm.cc == ARMCC_AL || insn.detail->arm.cc == ARMCC_UNDEF)
             {
                 uncond_branch = true;
+                mapping.is_unrecover_branch = true;
             }
             // last_known_reg_value.clear();
             break;
         }
         case ARM_INS_BL: {
-            const auto branch_target = insn.detail->arm.operands[0].imm;
-            result += std::format("ARM_CPU_PERFORM_{}_BL(ctx, 0x{:08x});\n", label_kind, branch_target);
-            ctx.branches.push(branch_target);
+            const uint64_t branch_target = insn.detail->arm.operands[0].imm;
+            if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
+            {
+                result += std::format("ARM_CPU_PERFORM_{}_BL(ctx, 0x{:08x});", label_kind, branch_target);
+                ctx.add_branch({(u32)branch_target, true, in_thumb_mode, true});
+            }
             // last_known_reg_value.clear();
             break;
         }
@@ -408,22 +741,25 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             if(insn.detail->arm.operands[0].type == ARM_OP_REG)
             {
                 const auto branch_target_reg = insn.detail->arm.operands[0].reg;
-                result += std::format("ARM_CPU_PERFORM_BLX_REG(ctx, ctx->{});\n", cs_reg_name(*state.handle, branch_target_reg));
+                result += std::format("ARM_CPU_PERFORM_BLX_REG(ctx, ctx->{});", cs_reg_name(*state.handle, branch_target_reg));
                 // if(auto it = last_known_reg_value.find((arm_reg)branch_target_reg); it != last_known_reg_value.end() && it->second.second)
                 // {
                 //     const auto value = it->second.first;
                 //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.start_code.size())
                 //     {
                 //         printf("Identified indirect jump to %08x\n", value);
-                //         ctx.branches.push(value);
+                //         ctx.add_branch(value);
                 //     }
                 // }
             }
             else
             {
-                const auto branch_target = insn.detail->arm.operands[0].imm;
-                result += std::format("ARM_CPU_PERFORM_{}_BLX_IMM(ctx, 0x{:08x});\n", label_kind, branch_target);
-                ctx.branches.push(branch_target | (1 ^ (int)(in_thumb_mode)));
+                const uint64_t branch_target = insn.detail->arm.operands[0].imm;
+                if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
+                {
+                    result += std::format("ARM_CPU_PERFORM_{}_BLX_IMM(ctx, 0x{:08x});", label_kind, branch_target);
+                    ctx.add_branch({(u32)(branch_target), true, !in_thumb_mode, true});
+                }
             }
             // last_known_reg_value.clear();
             break;
@@ -431,18 +767,18 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         
         case ARM_INS_SVC: {
             const auto svc_id = insn.detail->arm.operands[0].imm;
-            result += std::format("arm_cpu_instr_svc(ctx, {});\n", svc_id);
+            result += std::format("arm_cpu_instr_svc(ctx, {});", svc_id);
             // last_known_reg_value.clear();
             break;
         }
         case ARM_INS_UDF: {
             const auto udf_id = insn.detail->arm.operands[0].imm;
-            result += std::format("arm_cpu_instr_udf(ctx, {});\n", udf_id);
+            result += std::format("arm_cpu_instr_udf(ctx, {});", udf_id);
             break;
         }
         
         case ARM_INS_MCR: {
-            result += std::format("ARM_CPU_PERFORM_MCR(ctx, ctx->{}, {}, {}, {}, {}, {});\n",
+            result += std::format("ARM_CPU_PERFORM_MCR(ctx, ctx->{}, {}, {}, {}, {}, {});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg),
                 insn.detail->arm.operands[0].imm, /* ARM_OP_PIMM */
                 insn.detail->arm.operands[1].imm,
@@ -453,7 +789,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             break;
         }
         case ARM_INS_MRC: {
-            result += std::format("ARM_CPU_PERFORM_MRC(ctx, ctx->{}, {}, {}, {}, {}, {});\n",
+            result += std::format("ARM_CPU_PERFORM_MRC(ctx, ctx->{}, {}, {}, {}, {}, {});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg),
                 insn.detail->arm.operands[0].imm, /* ARM_OP_PIMM */
                 insn.detail->arm.operands[1].imm,
@@ -468,7 +804,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         case ARM_INS_MRS:
         case ARM_INS_VMSR:
         case ARM_INS_VMRS: {
-            result += std::format("ctx->{} = ctx->{};\n",
+            result += std::format("ctx->{} = ctx->{};",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
             break;
@@ -480,7 +816,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
                 && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG
                 && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_IMM)
             {
-                last_cmp = true;
+                last_cmp = -1; // leave some wiggle room for register setting before the ldr
                 last_cmp_reg = insn.detail->arm.operands[0].reg;
                 last_cmp_imm = insn.detail->arm.operands[1].imm;
             }
@@ -488,21 +824,21 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         case ARM_INS_CMN: {
             result += std::format("ARM_CPU_PERFORM_FLAGS_{}(ctx, ctx->{}, ", cs_insn_name(*state.handle, insn.id), cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             INSN_APPEND_operand2(0, 1);
-            result += ");\n";
+            result += ");";
             break;
         }
         case ARM_INS_TST:
         case ARM_INS_TEQ: {
             result += std::format("ARM_CPU_PERFORM_FLAGS_{}(ctx, ctx->{}, ", cs_insn_name(*state.handle, insn.id), cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             INSN_APPEND_operand2(1, 1);
-            result += ");\n";
+            result += ");";
             break;
         }
         case ARM_INS_REV:
         case ARM_INS_REV16:
         case ARM_INS_REVSH:
         case ARM_INS_CLZ: {
-            result += std::format("ctx->{} = ARM_CPU_PERFORM_{}(ctx, ctx->{});\n",
+            result += std::format("ctx->{} = ARM_CPU_PERFORM_{}(ctx, ctx->{});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_insn_name(*state.handle, insn.id),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
@@ -520,25 +856,160 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
                 cs_insn_name(*state.handle, insn.id), (int)insn.detail->arm.update_flags,
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
             INSN_APPEND_operand2(0, 2);
-            result += ");\n";
+            result += ");";
             if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
                 if(insn.detail->arm.update_flags)
                     assert(false && "Attempt to use a flag setting arithmetic insn with PC as Rd");
                 else
-                    result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);\n");
+                {
+                    result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                    if(insn.detail->arm.cc == ARMCC_AL)
+                    {
+                        uncond_branch = true;
+                        mapping.is_unrecover_branch = true;
+                    }
+                }
+            }
+            else if(insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC && insn.detail->arm.operands[2].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == insn.detail->arm.operands[2].reg)
+            {
+                if(auto it = last_known_reg_from_pc_value.find((arm_reg)(insn.detail->arm.operands[0].reg)); it != last_known_reg_from_pc_value.end())
+                {
+                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + it->second;
+                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
+                    {
+                        printf("found 2-step function pointer: 0x%08x (from offset at 0x%08x)\n", pointer, it->second);
+                        ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
+                    }
+                    last_known_reg_from_pc_value.erase(it);
+                }
+            }
+            // if we are an ADR
+            else if(insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC && insn.detail->arm.operands[2].type == arm_op_type::ARM_OP_IMM)
+            {
+                if(insn.id == ARM_INS_ADD)
+                {
+                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
+                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
+                    {
+                        printf("found ADR (add)! 0x%08x\n", pointer);
+                        if(last_adr_reg_used != arm_reg::ARM_REG_INVALID) // if there was an ADR before this one
+                        {
+                            printf("ADR complete! 0x%08llx\n", last_adr_value);
+                            ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
+                            ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
+                        }
+                    }
+                    last_adr_reg = insn.detail->arm.operands[0].reg;
+                    last_adr_value = pointer;
+                }
+                else if(insn.id == ARM_INS_SUB)
+                {
+                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) - insn.detail->arm.operands[2].imm;
+                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
+                    {
+                        printf("found ADR (sub)! 0x%08x\n", pointer);
+                        if(last_adr_reg_used != arm_reg::ARM_REG_INVALID) // if there was an ADR before this one
+                        {
+                            printf("ADR complete! 0x%08llx\n", last_adr_value);
+                            ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
+                            ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
+                        }
+                    }
+                    last_adr_reg = insn.detail->arm.operands[0].reg;
+                    last_adr_value = pointer;
+                }
+                else
+                {
+                    printf("looks like ADR? not quite\n");
+                }
+            }
+            // if we are in a continued ADR (ADRL)
+            else if(last_adr_reg_used == insn.detail->arm.operands[1].reg && insn.detail->arm.operands[0].reg == insn.detail->arm.operands[1].reg)
+            {
+                if(insn.id == ARM_INS_ADD)
+                {
+                    last_adr_value += insn.detail->arm.operands[2].imm;
+                    printf("found ADRL (add)! 0x%08llx\n", last_adr_value);
+                }
+                else if(insn.id == ARM_INS_SUB)
+                {
+                    last_adr_value -= insn.detail->arm.operands[2].imm;
+                    printf("found ADRL (sub)! 0x%08llx\n", last_adr_value);
+                }
             }
             break;
         }
 
+        case ARM_INS_ASR:
+        case ARM_INS_LSL:
+        case ARM_INS_LSR:
+        case ARM_INS_ROR: {
+            result += std::format("ctx->{} = ARM_CPU_PERFORM_{}_REG(ctx, ctx->{}, {}, ",
+                cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
+                cs_insn_name(*state.handle, insn.id),
+                cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
+                (int)insn.detail->arm.update_flags);
+            if(insn.detail->arm.operands[2].type == arm_op_type::ARM_OP_REG)
+                result += std::format("ctx->{}", cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
+            else
+                result += std::format("{}", insn.detail->arm.operands[2].imm);
+            result += ");\n";
+            if(insn.detail->arm.update_flags)
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+            else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
+            break;
+        }
+        case ARM_INS_RRX: {
+            result += std::format("ctx->{} = ARM_CPU_PERFORM_RRX(ctx, ctx->{}, {});\n",
+                cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
+                cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
+                (int)insn.detail->arm.update_flags);
+            if(insn.detail->arm.update_flags)
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+            else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
+            break;
+        }
+
+        case ARM_INS_MOVS:
         case ARM_INS_MOV: {
             result += std::format("ctx->{} = ", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             INSN_APPEND_operand2(insn.detail->arm.update_flags, 1);
             result += ";\n";
             if(insn.detail->arm.update_flags)
-                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});\n", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);\n");
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
+            
+            if(insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC)
+            {
+                const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
+                printf("found emulated bl! 0x%08x\n", pointer);
+                ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
+            }
             break;
         }
         case ARM_INS_MVN: {
@@ -546,9 +1017,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             INSN_APPEND_operand2(insn.detail->arm.update_flags, 1);
             result += ");\n";
             if(insn.detail->arm.update_flags)
-                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});\n", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);\n");
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
             break;
         }
         case ARM_INS_AND: {
@@ -558,9 +1036,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             INSN_APPEND_operand2(insn.detail->arm.update_flags, 2);
             result += ");\n";
             if(insn.detail->arm.update_flags)
-                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});\n", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);\n");
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
             break;
         }
         case ARM_INS_ORR: {
@@ -570,9 +1055,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             INSN_APPEND_operand2(insn.detail->arm.update_flags, 2);
             result += ");\n";
             if(insn.detail->arm.update_flags)
-                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});\n", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);\n");
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
             break;
         }
         case ARM_INS_EOR: {
@@ -582,9 +1074,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             INSN_APPEND_operand2(insn.detail->arm.update_flags, 2);
             result += ");\n";
             if(insn.detail->arm.update_flags)
-                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});\n", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);\n");
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
             break;
         }
         case ARM_INS_BIC: {
@@ -594,9 +1093,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             INSN_APPEND_operand2(insn.detail->arm.update_flags, 2);
             result += ");\n";
             if(insn.detail->arm.update_flags)
-                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});\n", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+                result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);\n");
+            {
+                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                if(insn.detail->arm.cc == ARMCC_AL)
+                {
+                    uncond_branch = true;
+                    mapping.is_unrecover_branch = true;
+                }
+            }
             break;
         }
         
@@ -676,7 +1182,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         }
 
         case ARM_INS_SEL: {
-            result += std::format("ARM_CPU_PERFORM_SEL(ctx, ctx->{}, ctx->{}, ctx->{});\n",
+            result += std::format("ARM_CPU_PERFORM_SEL(ctx, ctx->{}, ctx->{}, ctx->{});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg)
@@ -771,7 +1277,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         }
 
         case ARM_INS_CLREX: {
-            result += "ARM_CPU_PERFORM_CLREX(ctx);\n";
+            result += "ARM_CPU_PERFORM_CLREX(ctx);";
             break;
         }
         
@@ -795,7 +1301,9 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             INSN_APPEND_LDR_TYPE(uint32_t,);
 
             // beyond this is code recognition
-            if(last_cmp_used && insn.detail->arm.cc == ARMCC_LS && insn.detail->arm.op_count == 2
+
+            // switch-case detection type 1
+            if(last_cmp_used != 0 && (insn.detail->arm.cc == ARMCC_LS || insn.detail->arm.cc == ARMCC_LO) && insn.detail->arm.op_count == 2
                 && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC
                 && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_MEM
                 && insn.detail->arm.operands[1].mem.base == arm_reg::ARM_REG_PC
@@ -804,17 +1312,22 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
                 && insn.detail->arm.operands[1].shift.value == 2
             )
             {
-                printf("switch statement detected: %lld entries\n", last_cmp_imm+1);
-                for(int64_t index = 0; index <= last_cmp_imm; ++index)
+                const int last_cmp_imm_offset = (insn.detail->arm.cc == ARMCC_LS) ? 1 : 0;
+                printf("switch statement detected: %lld entries\n", (last_cmp_imm + last_cmp_imm_offset));
+                for(int64_t index = 0; index < (last_cmp_imm + last_cmp_imm_offset); ++index)
                 {
                     u32 value = 0;
-                    const u32 pointer = insn.address + 8 + index * 4;
-                    std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer)], 4);
-                    printf("Entry %lld: %08x\n", index, value);
-                    ctx.get_mapping(pointer).visited = true;
-                    ctx.branches.push(value);
+                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + index * 4;
+                    std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer & ~1)], 4);
+                    printf("Entry %lld (0x%08x): 0x%08x\n", index, pointer, value);
+                    auto& entry_mapping = ctx.get_mapping(pointer);
+                    entry_mapping.tried = true;
+                    entry_mapping.jumptable_entry = true;
+                    ctx.add_branch({(u32)(value), false, false, false});
                 }
+                last_cmp = 0; // found a switch
             }
+            // function pointer write to register for further bx/blx (assumed) detection
             else if(insn.detail->arm.op_count == 2
                 && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_MEM
                 && insn.detail->arm.operands[1].mem.base == arm_reg::ARM_REG_PC
@@ -823,15 +1336,27 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             {
                 printf("register set detected: from pc[%d:+4]\n", insn.detail->arm.operands[1].mem.disp);
                 u32 value = 0;
-                const u32 pointer = insn.address + 8 + insn.detail->arm.operands[1].mem.disp;
-                std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer)], 4);
-                // last_known_reg_value[(arm_reg)insn.detail->arm.operands[0].reg] = std::make_pair(value, true);
+                const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[1].mem.disp;
+                std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer & ~1)], 4);
+                last_known_reg_from_pc_value[(arm_reg)insn.detail->arm.operands[0].reg] = value;
                 // HACK: if the set value looks like a pointer to code, add it to the queue
-                if (ctx.start_addr + 0x20 <= value && value < ctx.start_addr + ctx.start_code.size())
+                if (ctx.start_addr + ctx.initial_skip_offset <= value && value < ctx.start_addr + ctx.start_code.size())
                 {
-                    printf("Maybe identified function pointer to %08x\n", value);
-                    ctx.branches.push(value);
+                    ctx.get_mapping(value).has_adr_start = value;
+                    if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
+                    {
+                        printf("Maybe identified function pointer to %08x\n", value);
+                        // would need to check LR being set before to be suire about is_function_start
+                        ctx.add_guess_branch({(u32)(value), false, false, false});
+                    }
                 }
+            }
+            // direct load to PC
+            else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC && insn.detail->arm.cc == ARMCC_AL)
+            {
+                printf("ldr as return detected\n");
+                uncond_branch = true;
+                mapping.is_unrecover_branch = true;
             }
             break;
         }
@@ -848,7 +1373,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
                 result += std::format("{}", insn.detail->arm.operands[2].mem.disp);
             else
                 result += std::format("ctx->{}", cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.index));
-            result += std::format("), {}, {});\n", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
+            result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
             break;
         }
         
@@ -868,7 +1393,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             {
                 INSN_APPEND_LDM(double, 0, 8, 8 * (insn.detail->arm.op_count - 1));
             }
-            else if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_S31)
+            else if(insn.detail->arm.operands[1].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[1].reg <= arm_reg::ARM_REG_S31)
             {
                 INSN_APPEND_LDM(float, 0, 4, 4 * (insn.detail->arm.op_count - 1));
             }
@@ -879,7 +1404,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             {
                 INSN_APPEND_LDM(double, -8 * (insn.detail->arm.op_count - 1), +8, -8 * (insn.detail->arm.op_count - 1));
             }
-            else if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_S31)
+            else if(insn.detail->arm.operands[1].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[1].reg <= arm_reg::ARM_REG_S31)
             {
                 INSN_APPEND_LDM(float, -4 * (insn.detail->arm.op_count - 1), +4, -4 * (insn.detail->arm.op_count - 1));
             }
@@ -928,11 +1453,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
                 result += std::format("{}", insn.detail->arm.operands[2].mem.disp);
             else
                 result += std::format("ctx->{}", cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.index));
-            result += std::format("), {}, {});\n", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
+            result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
             break;
             break;
         }
-        
         
         case ARM_INS_VSTR: {
             if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_D0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15)
@@ -950,7 +1474,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             {
                 INSN_APPEND_STM(double, 0, 8, 8 * (insn.detail->arm.op_count - 1));
             }
-            else if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_S31)
+            else if(insn.detail->arm.operands[1].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[1].reg <= arm_reg::ARM_REG_S31)
             {
                 INSN_APPEND_STM(float, 0, 4, 4 * (insn.detail->arm.op_count - 1));
             }
@@ -961,7 +1485,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
             {
                 INSN_APPEND_STM(double, -8 * (insn.detail->arm.op_count - 1), +8, -8 * (insn.detail->arm.op_count - 1));
             }
-            else if(insn.detail->arm.operands[0].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_S31)
+            else if(insn.detail->arm.operands[1].reg >= arm_reg::ARM_REG_S0 && insn.detail->arm.operands[1].reg <= arm_reg::ARM_REG_S31)
             {
                 INSN_APPEND_STM(float, -4 * (insn.detail->arm.op_count - 1), +4, -4 * (insn.detail->arm.op_count - 1));
             }
@@ -986,65 +1510,200 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const u32 addr)
         }
         
         default:
-            result += std::format("#warning \"unimplemented: {} {}\"\n", insn.mnemonic, insn.op_str);
+            result += std::format("#warning \"unimplemented: {} {}\"", insn.mnemonic, insn.op_str);
             break;
         }
 
         if(insn.detail->arm.cc != ARMCC_AL && insn.detail->arm.cc != ARMCC_UNDEF)
         {
-            result += "}\n";
+            result += "\n}";
         }
 
-        ctx.insn_list.try_emplace(insn.address, result);
+        if(last_adr_reg_used != arm_reg::ARM_REG_INVALID && last_adr_reg == arm_reg::ARM_REG_INVALID)
+        {
+            if (ctx.start_addr + ctx.initial_skip_offset <= (u32)last_adr_value && (u32)last_adr_value < ctx.start_addr + ctx.start_code.size())
+            {
+                printf("ADR complete: 0x%08llx\n", last_adr_value);
+                ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
+                ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
+            }
+            last_adr_reg = arm_reg::ARM_REG_INVALID;
+        }
+
+        if(insn.id != arm_insn::ARM_INS_LDR && insn.detail->arm.op_count >= 2 && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG)
+        {
+            last_known_reg_from_pc_value.erase((arm_reg)(insn.detail->arm.operands[0].reg));
+        }
+
+        ctx.insn_temp_list.emplace_back(active_address, std::move(result));
         if(uncond_branch)
+        {
+            printf("Unconditional branch detected, stop.\n");
             break;
+        }
     }
 
     if(!iter_success)
     {
+        // discards chunk
         printf("exit from failure to disas\n");
+        for(auto& temp_insn : ctx.insn_temp_list)
+        {
+            auto& mapping = ctx.get_mapping(temp_insn.first);
+            mapping.reset();
+            mapping.failed_guess = true;
+        }
+        auto& mapping = ctx.get_mapping(entry.addr);
+        mapping.failed_guess = true;
+        ctx.insn_temp_list.clear();
+        ctx.discard_branches();
+    }
+    else
+    {
+        // saves chunk instructions, to be written
+        for(auto& temp_insn : ctx.insn_temp_list)
+        {
+            ctx.insn_list.insert(std::move(temp_insn));
+        }
+        ctx.insn_temp_list.clear();
+        ctx.commit_branches();
     }
 }
 
-static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename)
+#define ALIGN_PAGE_NUM(n) (((n) + (0x1000u - 1u)) & -0x1000u)
+static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save)
 {
-    ProcessDisasmContext ctx{.start_addr = start_addr, .start_code = start_code};
+    ProcessDisasmContext ctx{.start_addr = start_addr, .start_code = start_code, .allow_thumb = allow_thumb};
 
     printf("Checking initial pointer: %08x\n", start_addr);
-    ctx.branches.push(start_addr);
+    ctx.add_branch({start_addr, false, false, true});
+    ctx.commit_branches();
+    do {
+        const std::optional<ProcessDisasmContext::BranchDestination> dest = ctx.get_next_branch_if([](const ProcessDisasmContext::BranchDestination& dest) {
+            // only want sure ARM branches for the first run
+            return !(dest.is_thumb || dest.is_guess);
+        });
+        if(!dest) break;
+        disasm_chunk(ctx, *dest);
+    } while(!ctx.branches.empty());
 
-    printf("\n");
     for(std::size_t i = 0; i < rodata.size(); i += sizeof(u32))
     {
+        const u32 analyzed_addr = start_addr + ALIGN_PAGE_NUM(start_code.size()) + i;
         u32 value = 0;
         std::memcpy(&value, &rodata[i], 4);
-        if(start_addr + 0x20 <= value && value < start_addr + start_code.size())
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
         {
-            printf("Checking rodata pointer: %08x\n", value);
-            ctx.branches.push(value);
+            if((value & 2) && !(value & 1)) // misaligned arm
+                continue;
+
+            // printf("Checking rodata pointer (%08x): %08x\n", analyzed_addr, value);
+            ctx.add_guess_branch({value, false, false, false});
         }
     }
-    printf("\n");
+
     for(std::size_t i = 0; i < data.size(); i += sizeof(u32))
     {
+        const u32 analyzed_addr = start_addr + ALIGN_PAGE_NUM(start_code.size()) + ALIGN_PAGE_NUM(rodata.size()) + i;
         u32 value = 0;
-        std::memcpy(&value, &data[i], 4);
-        if(start_addr + 0x20 <= value && value < start_addr + start_code.size())
+        std::memcpy(&value, &data[i], sizeof(u32));
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
         {
-            printf("Checking data pointer: %08x\n", value);
-            ctx.branches.push(value);
+            if((value & 2) && !(value & 1)) // misaligned arm
+                continue;
+    
+            // printf("Checking data pointer (%08x): %08x\n", analyzed_addr, value);
+            ctx.add_guess_branch({value, false, false, false});
         }
     }
-    printf("\n");
 
-    while(!ctx.branches.empty())
+    for(u32 i = 0; i < start_code.size() / 4; ++i)
     {
-        const u32 addr = ctx.branches.front();
-        ctx.branches.pop();
-        disasm_chunk(ctx, addr);
+        if(ctx.analyzed[i * 3].visited || ctx.analyzed[i * 3].tried)
+            continue;
+
+        const u32 analyzed_addr = start_addr + i * 4;
+        u32 value = 0;
+        std::memcpy(&value, &start_code[i * 4], sizeof(u32));
+        if(value == 0)
+            continue;
+
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
+        {
+            if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
+            {
+                printf("Checking text pointer (%08x): %08x\n", analyzed_addr, value);
+                ctx.add_guess_branch({value, false, false, false});
+            }
+        }
+        value += analyzed_addr;
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
+        {
+            if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
+            {
+                printf("Checking text offset pointer (%08x): %08x\n", analyzed_addr, value);
+                ctx.add_guess_branch({value, false, false, false});
+            }
+        }
     }
 
-    printf("\n");
+    ctx.commit_branches();
+    while(!ctx.branches.empty())
+    {
+        const auto dest = ctx.get_next_branch();
+        // no need to check, the non *_if function only returns nullopt on empty (which is invalidated by the while)
+        // if(!dest) break;
+        disasm_chunk(ctx, *dest);
+    } 
+
+    bool had_branches = true;
+    while(had_branches)
+    {
+        for(u32 i = 0; i < start_code.size() / 4; ++i)
+        {
+            auto& current_mapping = ctx.analyzed[i * 3];
+            if(current_mapping.visited || current_mapping.tried)
+                continue;
+
+            if(!current_mapping.has_adr_start)
+                continue;
+
+            const u32 analyzed_addr = start_addr + i * 4;
+            // printf("Doing an ADR-based array starting at 0x%08x (current 0x%08x)\n", current_mapping.has_adr_start, analyzed_addr);
+
+            u32 value = 0;
+            std::memcpy(&value, &start_code[i * 4], sizeof(u32));
+            value += current_mapping.has_adr_start;
+            if(ctx.start_addr + ctx.initial_skip_offset <= value && value < ctx.start_addr + ctx.start_code.size())
+            {
+                if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
+                {
+                    printf("Checking text array pointer with base %08x (%08x): %08x\n", current_mapping.has_adr_start, analyzed_addr, value);
+                    if((i + 1) < (start_code.size() / 4))
+                    {
+                        auto& next_mapping = ctx.analyzed[(i + 1) * 3];
+                        if(!next_mapping.has_adr_start)
+                            next_mapping.has_adr_start = current_mapping.has_adr_start;
+                    }
+                    current_mapping.tried = true;
+                    ctx.add_guess_branch({value, false, false, false});
+                }
+            }
+        }
+
+        had_branches = !ctx.branches_temp_list.empty();
+        printf("had_branches: %d\n", (int)had_branches);
+        ctx.commit_branches();
+        while(!ctx.branches.empty())
+        {
+            const auto dest = ctx.get_next_branch();
+            // no need to check, the non *_if function only returns nullopt on empty (which is invalidated by the while)
+            // if(!dest) break;
+            disasm_chunk(ctx, *dest);
+        }
+    }
+
+
     u32 unvisited_start = 0;
     bool unvisited_ongoing = false;
     for(u32 i = 0; i < start_code.size() / 4; ++i)
@@ -1053,8 +1712,13 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         {
             if(unvisited_ongoing)
             {
-               unvisited_ongoing = false;
-                printf("unvisited: %08x - %08x (length %08x)\n", unvisited_start, start_addr + i * 4, start_addr + i * 4 - unvisited_start);
+                unvisited_ongoing = false;
+                printf("unvisited: %08x - %08x (length %08x)", unvisited_start, start_addr + i * 4, start_addr + i * 4 - unvisited_start);
+                if(ctx.analyzed[i * 3].jumptable_entry)
+                {
+                    printf(" (is jump table entry)");
+                }
+                printf("\n");
             }
         }
         else if(!unvisited_ongoing)
@@ -1063,6 +1727,13 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             unvisited_ongoing = true;
         }
     }
+    if(unvisited_ongoing)
+    {
+        unvisited_ongoing = false;
+        printf("unvisited: %08x - %08x (length %08x)", unvisited_start, (u32)start_code.size(), (u32)(start_code.size() - unvisited_start));
+        printf("\n");
+    }
+
     for(u32 i = 0; i < start_code.size() / 4; ++i)
     {
         if(ctx.analyzed[i * 3 + 1].visited)
@@ -1075,57 +1746,83 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         }
     }
 
+    printf("Final insn_temp_list capacity: %zd\n", ctx.insn_temp_list.capacity());
+    printf("Final branches_temp_list capacity: %zd\n", ctx.branches_temp_list.capacity());
+
     const std::string source_file_path = filename + ".src.c";
     const std::string labels_arm_file_path = filename + ".lab.arm.c";
     const std::string labels_thumb_file_path = filename + ".lab.thumb.c";
-    FILE_ptr source_file_ptr{fopen(source_file_path.c_str(), "wb")};
-    FILE_ptr labels_arm_file_ptr{fopen(labels_arm_file_path.c_str(), "wb")};
-    FILE_ptr labels_thumb_file_ptr{fopen(labels_thumb_file_path.c_str(), "wb")};
+    FILE_ptr source_file_ptr{do_dummy_save ? nullptr : fopen(source_file_path.c_str(), "wb")};
+    FILE_ptr labels_arm_file_ptr{do_dummy_save ? nullptr : fopen(labels_arm_file_path.c_str(), "wb")};
+    FILE_ptr labels_thumb_file_ptr{do_dummy_save ? nullptr : fopen(labels_thumb_file_path.c_str(), "wb")};
     auto source_file = source_file_ptr.get();
     auto labels_arm_file = labels_arm_file_ptr.get();
     auto labels_thumb_file = labels_thumb_file_ptr.get();
 
-    fprintf(source_file, "#include \"./include/arm_cpu_ctx.h\"\n\n");
-    fprintf(source_file, "void ATTR_FASTCALL ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
-    fprintf(source_file, "goto LABEL_ARM_start;\n");
-    fprintf(source_file, "LABEL_ARM_error:\n");
-    fprintf(source_file, "LABEL_THUMB_error:\n");
-    fprintf(source_file, "arm_cpu_instr_runtime_error(ctx);\n");
+    safe_fprintf(source_file, "#include \"./include/arm_cpu_ctx.h\"\n\n");
+    safe_fprintf(source_file, "void ATTR_FASTCALL ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
+    safe_fprintf(source_file, "goto LABEL_ARM_start;\n");
+    safe_fprintf(source_file, "LABEL_ARM_error:\n");
+    safe_fprintf(source_file, "LABEL_THUMB_error:\n");
+    safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx);\n");
 
-    fprintf(source_file, "static const int LABELS_ARM_TABLE[] = {\n");
-    fprintf(source_file, "#include \"%s.lab.arm.c\"\n", filename.c_str());
-    fprintf(source_file, "};\n");
+    safe_fprintf(source_file, "static const int LABELS_ARM_TABLE[] = {\n");
+    safe_fprintf(source_file, "#include \"%s.lab.arm.c\"\n", filename.c_str());
+    safe_fprintf(source_file, "};\n");
 
-    fprintf(source_file, "static const int LABELS_THUMB_TABLE[] = {\n");
-    fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
-    fprintf(source_file, "};\n");
+    safe_fprintf(source_file, "static const int LABELS_THUMB_TABLE[] = {\n");
+    safe_fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
+    safe_fprintf(source_file, "};\n");
 
-    fprintf(source_file, "LABEL_ARM_start:\n");
-    fprintf(source_file, "LABEL_THUMB_start:\n");
+    safe_fprintf(source_file, "LABEL_ARM_start:\n");
+    safe_fprintf(source_file, "LABEL_THUMB_start:\n");
 
     const char* label_kind = "ARM";
-    for(u32 i = 0; i < start_code.size() / 4; ++i)
+    uint64_t insn_addr_previous = start_addr - 4;
+    for(const auto& [insn_address, insn_text] : ctx.insn_list)
     {
-        const u32 insn_address = i * 4 + start_addr;
-        if(ctx.analyzed[i * 3].visited)
+        if((insn_address & 0x3) != 0)
+            continue;
+
+        for(insn_addr_previous += 4; insn_addr_previous < insn_address; insn_addr_previous += 4)
         {
-            fprintf(labels_arm_file, "&&LABEL_%s_0x%08x - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
-            fprintf(source_file, "LABEL_%s_0x%08x:\n", label_kind, insn_address);
-            if(auto it = ctx.insn_list.find(insn_address); it != ctx.insn_list.end())
+            if(ctx.get_mapping(insn_addr_previous).visited)
             {
-                fwrite(it->second.data(), 1, it->second.size(), source_file);
+                printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
-            else
-            {
-                fprintf(source_file, "// invalid addr, no matching insn\n");
-            }
+            safe_fprintf(labels_arm_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
         }
-        else
-        {
-            fprintf(labels_arm_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
-        }
+
+        safe_fprintf(labels_arm_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
+        safe_fprintf(source_file, "LABEL_%s_0x%08llx:\n", label_kind, insn_address);
+        safe_fwrite(insn_text.data(), 1, insn_text.size(), source_file);
+        safe_fprintf(source_file, "\n");
     }
+
     label_kind = "THUMB";
+
+    insn_addr_previous = start_addr - 2;
+    for(const auto& [insn_address, insn_text] : ctx.insn_list)
+    {
+        if((insn_address & 0x1) != 1)
+            continue;
+
+        const uint64_t active_address = insn_address & ~0x1;
+        for(insn_addr_previous += 2; insn_addr_previous < active_address; insn_addr_previous +=2)
+        {
+            if(ctx.get_mapping(insn_addr_previous + 1).visited)
+            {
+                printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
+            }
+            safe_fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
+        }
+
+        safe_fprintf(labels_thumb_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, active_address, label_kind);
+        safe_fprintf(source_file, "LABEL_%s_0x%08llx:\n", label_kind, active_address);
+        fwrite(insn_text.data(), 1, insn_text.size(), source_file);
+        safe_fprintf(source_file, "\n");
+    }
+
     for(u32 i = 0; i < start_code.size() / 4; ++i)
     {
         for(int j = 0; j < 2; ++j)
@@ -1133,26 +1830,27 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             const u32 insn_address = i * 4 + start_addr + 1 + j * 2;
             if(ctx.analyzed[i * 3 + j + 1].visited)
             {
-                fprintf(labels_thumb_file, "&&LABEL_%s_0x%08x - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
-                fprintf(source_file, "LABEL_%s_0x%08x:\n", label_kind, insn_address);
+                safe_fprintf(labels_thumb_file, "&&LABEL_%s_0x%08x - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
+                safe_fprintf(source_file, "LABEL_%s_0x%08x:\n", label_kind, insn_address);
                 if(auto it = ctx.insn_list.find(insn_address); it != ctx.insn_list.end())
                 {
                     fwrite(it->second.data(), 1, it->second.size(), source_file);
+                    safe_fprintf(source_file, "\n");
                 }
                 else
                 {
-                    fprintf(source_file, "// invalid addr, no matching insn\n");
+                    safe_fprintf(source_file, "// invalid addr, no matching insn\n");
                 }
             }
             else
             {
-                fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
+                safe_fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
             }
         }
     }
 
-    fprintf(source_file, "arm_cpu_instr_runtime_error(ctx); /* should never get there */\n");
-    fprintf(source_file, "}\n");
+    safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx); /* should never get there */\n");
+    safe_fprintf(source_file, "}\n");
 }
 
 static std::vector<u8> load_data(const std::string& path)
@@ -1186,5 +1884,5 @@ int main(int argc, char** argv)
     auto seg_rodata = load_data(argv[2]);
     auto seg_data = load_data(argv[3]);
 
-    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4]);
+    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, false);
 }
