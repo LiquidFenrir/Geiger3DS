@@ -9,7 +9,7 @@ find . -name \*.elf -exec cp {} ./bin/ ';'
 cd ./bin
 
 # move every 3dsx and elf to a folder with the same name
-find . -maxdepth 1 -name \*.3dsx -exec bash -c 'echo $1 | tail -c +3 | head -c -6' namesfrom3dsx {} ';' | xargs -i bash -c 'mkdir "./{}" && mv "./{}.*" "./{}/"'
+find . -maxdepth 1 -name \*.3dsx -exec bash -c 'echo $(echo -n $1 | tail -c +3 | head -c -5)' namesfrom3dsx {} ';' | xargs -i bash -c 'mkdir "./{}" && mv ./{}.* "./{}/"'
 
 # dump the 3dsx and the bin's page count per section
 find . -maxdepth 1 -exec bash -c 'echo $1 | tail -c +3' names {} ';' | xargs -i bash -c '3dsxdump "./{}/{}.3dsx" "./{}/{}.bin" > "./{}/{}.pages.txt"'

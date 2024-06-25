@@ -3,21 +3,24 @@ import sys
 def main(unvisited_path, objdump_file_path):
     addrs_list = []
     constant_addrs = {}
+    nop_addrs = set()
     constant_sizes = {}
     constant_addrs_last = 0
     with open(objdump_file_path) as objdump_file_path_f:
         for line in objdump_file_path_f:
             if line.startswith("  "):
-                addr_txt, bytes_txt, remains = line[2:].split('\t', 3)
+                addr_txt, bytes_txt, remains = line[2:].split('\t', 2)
                 addr = int(addr_txt[:-1], 16) # remove ':'
 
                 constant_addrs_last = addr
                 if remains[0] == '.' or bytes_txt[:-1] == "00000000":
                     # .word or zero'd u32 'inside' a function
-                    constant_addrs[constant_addrs_last] = remains
+                    constant_addrs[constant_addrs_last] = bytes_txt[:-1]
                     constant_sizes[constant_addrs_last] = 4
                     addrs_list.append(constant_addrs_last)
                     constant_addrs_last += 4
+                elif bytes_txt[:-4] == "e320f" or "nop\t" in remains:
+                    nop_addrs.add(addr)
                 else:
                     # instruction
                     pass
@@ -46,12 +49,13 @@ def main(unvisited_path, objdump_file_path):
                 # print(f"endof chunk: {i:08x}")
         val = constant_addrs.get(i)
         sz = constant_sizes.get(i)
-        if val is None:
-            if cur_chunk != (0, 0):
-                print(f"have instr {i:08x} in chunk {cur_chunk[0]:08x} - {cur_chunk[1]:08x} (length {cur_chunk[1] - cur_chunk[0]:08x})")
-        else:
-            if cur_chunk == (0, 0):
-                print(f"have const {i:08x} outside chunk")
+        if i not in nop_addrs:
+            if val is None:
+                if cur_chunk != (0, 0):
+                    print(f"have instr {i:08x} in chunk {cur_chunk[0]:08x} - {cur_chunk[1]:08x} (length {cur_chunk[1] - cur_chunk[0]:08x})")
+            else:
+                if cur_chunk == (0, 0):
+                    print(f"have const {i:08x} outside chunk")
 
         if sz is None:
             i ^= (i & 3)

@@ -38,7 +38,15 @@ using FILE_ptr = std::unique_ptr<FILE, FILE_deleter>;
 
 struct ProcessDisasmContext {
     const u32 start_addr;
+    const u32 start_code_addr;
     const std::span<const u8> start_code;
+    const u32 end_code_addr;
+    const u32 start_rodata_addr;
+    const std::span<const u8> start_rodata;
+    const u32 end_rodata_addr;
+    const u32 start_data_addr;
+    const std::span<const u8> start_data;
+    const u32 end_data_addr;
     const bool allow_thumb;
     bool suppress_print{false};
 
@@ -63,11 +71,43 @@ struct ProcessDisasmContext {
         }
     };
     std::vector<MappingValue> analyzed{(start_code.size() / 4) * 3};
+    std::span<const u8> get_from_pointer(const u32 addr, const u32 size)
+    {
+        if(start_code_addr <= addr && addr + size <= end_code_addr)
+        {
+            const auto offset = get_offset_text(addr);
+            return start_code.subspan(offset, size);
+        }
+        else if(start_rodata_addr <= addr && addr + size <= end_rodata_addr)
+        {
+            const auto offset = get_offset_rodata(addr);
+            return start_rodata.subspan(offset, size);
+        }
+        else if(start_data_addr <= addr && addr + size <= end_data_addr)
+        {
+            const auto offset = get_offset_data(addr);
+            return start_data.subspan(offset, size);
+        }
+        return {};
+    }
 
     std::size_t get_offset(const u32 addr)
     {
         return addr - start_addr;
     }
+    std::size_t get_offset_text(const u32 addr)
+    {
+        return addr - start_code_addr;
+    }
+    std::size_t get_offset_rodata(const u32 addr)
+    {
+        return addr - start_rodata_addr;
+    }
+    std::size_t get_offset_data(const u32 addr)
+    {
+        return addr - start_data_addr;
+    }
+
     u32 get_mapping_index(const u32 addr)
     {
         const u32 offset = get_offset(addr);
@@ -432,6 +472,11 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     int64_t last_adr_value = 0;
     u32 last_branch_addr = -1;
     ARMCC_CondCodes last_branch_condcode = ARMCC_AL;
+    int last_ldr_offset_for_switch_reg = arm_reg::ARM_REG_INVALID;
+    u32 last_ldr_offset_for_switch_addr = -1;
+    int64_t last_ldr_offset_for_switch_max_offset = 0;
+    std::string_view last_ldr_offset_for_switch_type;
+    bool last_is_uncond_bl = false;
 
     // pair: value, known unchanged
     std::map<arm_reg, uint32_t> last_known_reg_from_pc_value;
@@ -501,6 +546,12 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             // we don't have thumb2 in v6k
             cond_printf("thumb2 -> invalid\n");
             iter_success = false;
+            mapping.failed_guess = true;
+            break;
+        }
+        else if(last_is_uncond_bl && !(insn.detail->arm.cc == ARMCC_AL || insn.detail->arm.cc == ARMCC_UNDEF))
+        {
+            cond_printf("condition after bl -> invalid\n");
             mapping.failed_guess = true;
             break;
         }
@@ -684,7 +735,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             --last_cmp;
 
         const int last_adr_reg_used = last_adr_reg;
+        const int last_ldr_offset_for_switch_reg_used = last_ldr_offset_for_switch_reg;
         last_adr_reg = arm_reg::ARM_REG_INVALID;
+        last_ldr_offset_for_switch_reg = arm_reg::ARM_REG_INVALID;
+        last_is_uncond_bl = false;
         if(!got_okay_can_skip) switch(insn.id)
         {
         case ARM_INS_B: {
@@ -743,6 +797,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("ARM_CPU_PERFORM_{}_BL(ctx, 0x{:08x});", label_kind, branch_target);
                 ctx.add_branch({(u32)branch_target, true, in_thumb_mode, true});
             }
+            last_is_uncond_bl = true;
             // last_known_reg_value.clear();
             break;
         }
@@ -769,6 +824,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     result += std::format("ARM_CPU_PERFORM_{}_BLX_IMM(ctx, 0x{:08x});", label_kind, branch_target);
                     ctx.add_branch({(u32)(branch_target), true, !in_thumb_mode, true});
                 }
+            }
+            if(insn.detail->arm.cc == ARMCC_AL)
+            {
+                last_is_uncond_bl = true;
             }
             // last_known_reg_value.clear();
             break;
@@ -950,6 +1009,64 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                         mapping.is_unrecover_branch = true;
                     }
                 }
+
+                if(insn.detail->arm.cc == ARMCC_AL && insn.id == ARM_INS_ADD
+                    && insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC
+                    && insn.detail->arm.operands[2].type == arm_op_type::ARM_OP_REG
+                    && insn.detail->arm.operands[2].reg == last_ldr_offset_for_switch_reg_used
+                    && insn.detail->arm.operands[2].shift.type == arm_shifter::ARM_SFT_LSL && insn.detail->arm.operands[2].shift.value == 2)
+                {
+                    cond_printf("offset switch statement detected: %lld entries\n", last_ldr_offset_for_switch_max_offset);
+                    std::vector<int64_t> switch_offsets;
+                    using append_offset_f_t = void(*)(ProcessDisasmContext&, std::vector<int64_t>&, const u32, const int64_t);
+                    append_offset_f_t append_offset = [](ProcessDisasmContext&, std::vector<int64_t>&, const u32, const int64_t) { };
+#define MAKE_APPEND_OFFSET(T) [](ProcessDisasmContext& ctx, std::vector<int64_t>& switch_offsets, const u32 pointer_base, const int64_t index) { \
+        const u32 pointer = pointer_base + index * sizeof(T); \
+        T value = 0; \
+        { \
+            auto sp = ctx.get_from_pointer(pointer, sizeof(T)); \
+            /* cond_printf("offset switch statement entry %lld: vptr %08x ptr %p sz %zd\n", index, pointer, sp.data(), sp.size()); */ \
+            std::memcpy(&value, sp.data(), sizeof(T)); \
+            if(pointer < ctx.start_code_addr) \
+            { \
+                auto& entry_mapping = ctx.get_mapping(pointer); \
+                entry_mapping.tried = true; \
+                entry_mapping.jumptable_entry = true; \
+            } \
+        } \
+        switch_offsets.push_back(value); \
+    }
+
+                    if(last_ldr_offset_for_switch_type == "b")
+                    {
+                        append_offset = MAKE_APPEND_OFFSET(uint8_t);
+                    }
+                    else if(last_ldr_offset_for_switch_type == "sb")
+                    {
+                        append_offset = MAKE_APPEND_OFFSET(int8_t);
+                    }
+                    else if(last_ldr_offset_for_switch_type == "h")
+                    {
+                        append_offset = MAKE_APPEND_OFFSET(uint16_t);
+                    }
+                    else if(last_ldr_offset_for_switch_type == "sh")
+                    {
+                        append_offset = MAKE_APPEND_OFFSET(int16_t);
+                    }
+
+                    for(int64_t index = 0; index < last_ldr_offset_for_switch_max_offset; ++index)
+                    {
+                        append_offset(ctx, switch_offsets, last_ldr_offset_for_switch_addr, index);
+                    }
+
+                    for(int64_t index = 0; index < last_ldr_offset_for_switch_max_offset; ++index)
+                    {
+                        const int64_t offset = switch_offsets[index];
+                        const u32 value = active_address + (in_thumb_mode ? 4 : 8) + offset * 4;
+                        cond_printf("Entry %lld (pc off %08llx): 0x%08x\n", index, offset, value);
+                        ctx.add_branch({(u32)(value), false, false, false});
+                    }
+                }
             }
             else if(insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC && insn.detail->arm.operands[2].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == insn.detail->arm.operands[2].reg)
             {
@@ -1089,6 +1206,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
                 cond_printf("found emulated bl! 0x%08x\n", pointer);
                 ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
+                last_is_uncond_bl = true;
             }
             break;
         }
@@ -1363,18 +1481,86 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         
         case ARM_INS_LDRB: {
             INSN_APPEND_LDR_TYPE(uint8_t, (uint32_t));
+            
+            // beyond this is code recognition
+            // switch-case detection for uint8 offset table
+            if(auto it = last_known_reg_from_pc_value.end(); last_cmp_used != 0 && (insn.detail->arm.cc == ARMCC_AL) && insn.detail->arm.op_count == 2
+                && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG
+                && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_MEM
+                && (it = last_known_reg_from_pc_value.find(insn.detail->arm.operands[1].mem.base)) != last_known_reg_from_pc_value.end()
+                && insn.detail->arm.operands[1].mem.index == last_cmp_reg
+            )
+            {
+                last_ldr_offset_for_switch_reg = insn.detail->arm.operands[0].reg;
+                last_ldr_offset_for_switch_addr = it->second;
+                last_ldr_offset_for_switch_max_offset = last_branch_condcode == ARMCC_CondCodes::ARMCC_HI ? /* branched on > */ (last_cmp_imm + 1) : /* branched on >= */ last_cmp_imm;
+                last_ldr_offset_for_switch_type = "b";
+                cond_printf("possible offset switch: offtab base %08x, max indexd %lld, type 'b'\n", last_ldr_offset_for_switch_addr, last_ldr_offset_for_switch_max_offset);
+                last_cmp = 0; // found a switch
+            }
             break;
         }
         case ARM_INS_LDRSB: {
             INSN_APPEND_LDR_TYPE(int8_t, (int32_t));
+
+            // beyond this is code recognition
+            // switch-case detection for int8 offset table
+            if(auto it = last_known_reg_from_pc_value.end(); last_cmp_used != 0 && (insn.detail->arm.cc == ARMCC_AL) && insn.detail->arm.op_count == 2
+                && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG
+                && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_MEM
+                && (it = last_known_reg_from_pc_value.find(insn.detail->arm.operands[1].mem.base)) != last_known_reg_from_pc_value.end()
+                && insn.detail->arm.operands[1].mem.index == last_cmp_reg
+            )
+            {
+                last_ldr_offset_for_switch_reg = insn.detail->arm.operands[0].reg;
+                last_ldr_offset_for_switch_addr = it->second;
+                last_ldr_offset_for_switch_max_offset = last_branch_condcode == ARMCC_CondCodes::ARMCC_HI ? /* branched on > */ (last_cmp_imm + 1) : /* branched on >= */ last_cmp_imm;
+                last_ldr_offset_for_switch_type = "sb";
+                cond_printf("possible offset switch: offtab base %08x, max indexd %lld, type 'sb'\n", last_ldr_offset_for_switch_addr, last_ldr_offset_for_switch_max_offset);
+                last_cmp = 0; // found a switch
+            }
             break;
         }
         case ARM_INS_LDRH: {
             INSN_APPEND_LDR_TYPE(uint16_t, (uint32_t));
+
+            // beyond this is code recognition
+            // switch-case detection for uint16 offset table
+            if(auto it = last_known_reg_from_pc_value.end(); last_cmp_used != 0 && (insn.detail->arm.cc == ARMCC_AL) && insn.detail->arm.op_count == 2
+                && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG
+                && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_MEM
+                && (it = last_known_reg_from_pc_value.find(insn.detail->arm.operands[1].mem.base)) != last_known_reg_from_pc_value.end()
+                && insn.detail->arm.operands[1].mem.index == last_cmp_reg
+            )
+            {
+                last_ldr_offset_for_switch_reg = insn.detail->arm.operands[0].reg;
+                last_ldr_offset_for_switch_addr = it->second;
+                last_ldr_offset_for_switch_max_offset = last_branch_condcode == ARMCC_CondCodes::ARMCC_HI ? /* branched on > */ (last_cmp_imm + 1) : /* branched on >= */ last_cmp_imm;
+                last_ldr_offset_for_switch_type = "h";
+                cond_printf("possible offset switch: offtab base %08x, max indexd %lld, type 'h'\n", last_ldr_offset_for_switch_addr, last_ldr_offset_for_switch_max_offset);
+                last_cmp = 0; // found a switch
+            }
             break;
         }
         case ARM_INS_LDRSH: {
             INSN_APPEND_LDR_TYPE(int16_t, (int32_t));
+            
+            // beyond this is code recognition
+            // switch-case detection for int16 offset table
+            if(auto it = last_known_reg_from_pc_value.end(); last_cmp_used != 0 && (insn.detail->arm.cc == ARMCC_AL) && insn.detail->arm.op_count == 2
+                && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG
+                && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_MEM
+                && (it = last_known_reg_from_pc_value.find(insn.detail->arm.operands[1].mem.base)) != last_known_reg_from_pc_value.end()
+                && insn.detail->arm.operands[1].mem.index == last_cmp_reg
+            )
+            {
+                last_ldr_offset_for_switch_reg = insn.detail->arm.operands[0].reg;
+                last_ldr_offset_for_switch_addr = it->second;
+                last_ldr_offset_for_switch_max_offset = last_branch_condcode == ARMCC_CondCodes::ARMCC_HI ? /* branched on > */ (last_cmp_imm + 1) : /* branched on >= */ last_cmp_imm;
+                last_ldr_offset_for_switch_type = "sh";
+                cond_printf("possible offset switch: offtab base %08x, max indexd %lld, type 'sh'\n", last_ldr_offset_for_switch_addr, last_ldr_offset_for_switch_max_offset);
+                last_cmp = 0; // found a switch
+            }
             break;
         }
         case ARM_INS_LDR: {
@@ -1382,7 +1568,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
 
             // beyond this is code recognition
 
-            // switch-case detection type 1
+            // switch-case detection for jump table
             if(last_cmp_used != 0 && (insn.detail->arm.cc == ARMCC_LS || insn.detail->arm.cc == ARMCC_LO) && insn.detail->arm.op_count == 2
                 && insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC
                 && insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_MEM
@@ -1393,12 +1579,13 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             )
             {
                 const int last_cmp_imm_offset = (insn.detail->arm.cc == ARMCC_LS) ? 1 : 0;
-                cond_printf("switch statement detected: %lld entries\n", (last_cmp_imm + last_cmp_imm_offset));
+                cond_printf("jump table switch statement detected: %lld entries\n", (last_cmp_imm + last_cmp_imm_offset));
                 for(int64_t index = 0; index < (last_cmp_imm + last_cmp_imm_offset); ++index)
                 {
                     u32 value = 0;
-                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + index * 4;
-                    std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer & ~1)], 4);
+                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + index * 4;
+                    
+                    std::memcpy(&value, ctx.get_from_pointer(pointer, 4).data(), 4);
                     cond_printf("Entry %lld (0x%08x): 0x%08x\n", index, pointer, value);
                     auto& entry_mapping = ctx.get_mapping(pointer);
                     entry_mapping.tried = true;
@@ -1414,10 +1601,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 && insn.detail->arm.operands[1].mem.index == arm_reg::ARM_REG_INVALID
             )
             {
-                cond_printf("register set detected: from pc[%d:+4]\n", insn.detail->arm.operands[1].mem.disp);
                 u32 value = 0;
-                const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[1].mem.disp;
-                std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer & ~1)], 4);
+                const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[1].mem.disp;
+                std::memcpy(&value, ctx.get_from_pointer(pointer, 4).data(), 4);
+                cond_printf("register set detected: from pc[%d:+4] == %08x @ %08x\n", insn.detail->arm.operands[1].mem.disp, value, pointer);
                 last_known_reg_from_pc_value[(arm_reg)insn.detail->arm.operands[0].reg] = value;
                 // HACK: if the set value looks like a pointer to code, add it to the queue
                 if (ctx.start_addr + ctx.initial_skip_offset <= value && value < ctx.start_addr + ctx.start_code.size())
@@ -1653,7 +1840,19 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
 #define ALIGN_PAGE_NUM(n) (((n) + (0x1000u - 1u)) & -0x1000u)
 static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save)
 {
-    ProcessDisasmContext ctx{.start_addr = start_addr, .start_code = start_code, .allow_thumb = allow_thumb};
+    ProcessDisasmContext ctx{
+        .start_addr = start_addr,
+        .start_code_addr = start_addr,
+        .start_code = start_code,
+        .end_code_addr = (u32)(start_addr + start_code.size()),
+        .start_rodata_addr = (u32)(ALIGN_PAGE_NUM(start_addr + start_code.size())),
+        .start_rodata = rodata,
+        .end_rodata_addr = (u32)(ALIGN_PAGE_NUM(start_addr + start_code.size()) + rodata.size()),
+        .start_data_addr = (u32)(ALIGN_PAGE_NUM(ALIGN_PAGE_NUM(start_addr + start_code.size()) + rodata.size())),
+        .start_data = data,
+        .end_data_addr = (u32)(ALIGN_PAGE_NUM(ALIGN_PAGE_NUM(start_addr + start_code.size()) + rodata.size()) + data.size()),
+        .allow_thumb = allow_thumb
+    };
 
     cond_printf("Checking initial pointer: %08x\n", start_addr);
     ctx.add_branch({start_addr, false, false, true});
