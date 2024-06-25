@@ -30,17 +30,28 @@ typedef enum arm_cpu_cc {
   arm_cpu_cc_undef = 15, // Undefined
 } arm_cpu_cc;
 
-#define ARM_CPU_STATUS_bitindex(ctx, bitindex) (int)(((ctx)->cpsr & (1u << (bitindex))) != 0)
-#define ARM_CPU_STATUS_N(ctx) ARM_CPU_STATUS_bitindex(ctx, 31)
-#define ARM_CPU_STATUS_Z(ctx) ARM_CPU_STATUS_bitindex(ctx, 30)
-#define ARM_CPU_STATUS_C(ctx) ARM_CPU_STATUS_bitindex(ctx, 29)
-#define ARM_CPU_STATUS_V(ctx) ARM_CPU_STATUS_bitindex(ctx, 28)
-#define ARM_CPU_STATUS_Q(ctx) ARM_CPU_STATUS_bitindex(ctx, 27)
-#define ARM_CPU_STATUS_T(ctx) ARM_CPU_STATUS_bitindex(ctx, 5)
+#define ARM_CPU_STATUS_get(cpsr, bitindex) ((cpsr) & (1u << (bitindex)))
+
+#define ARM_CPU_STATUS_N_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 31)
+#define ARM_CPU_STATUS_Z_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 30)
+#define ARM_CPU_STATUS_C_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 29)
+#define ARM_CPU_STATUS_V_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 28)
+#define ARM_CPU_STATUS_Q_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 27)
+#define ARM_CPU_STATUS_T_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 5)
+#define ARM_CPU_STATUS_GE_GET(ctx) (((ctx)->cpsr) & 0x000f0000)
+
+#define ARM_CPU_STATUS_bitindex(cpsr, bitindex) (int)(ARM_CPU_STATUS_get(cpsr, bitindex) != 0)
+
+#define ARM_CPU_STATUS_N(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 31)
+#define ARM_CPU_STATUS_Z(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 30)
+#define ARM_CPU_STATUS_C(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 29)
+#define ARM_CPU_STATUS_V(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 28)
+#define ARM_CPU_STATUS_Q(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 27)
+#define ARM_CPU_STATUS_T(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 5)
 #define ARM_CPU_STATUS_GE(ctx) (((ctx)->cpsr >> 16) & 0xf)
 
-// #define ARM_CPU_STATUS_T_GET(ctx) ((ctx)->cpsr & (1u << (5)))
 #define ARM_CPU_STATUS_set(ctx, new_flag, bitindex) (((ctx)->cpsr & ~(1u << (bitindex))) | (new_flag << (bitindex)))
+
 #define ARM_CPU_STATUS_N_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 31)
 #define ARM_CPU_STATUS_Z_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 30)
 #define ARM_CPU_STATUS_C_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 29)
@@ -161,10 +172,10 @@ typedef struct arm_cpu_ctx {
         uint32_t thread_upro;
         uint32_t thread_uprw;
     } cp15;
-    uint32_t cpsr;
+    uint32_t cpsr; // start as 0x00000010
     uint32_t fpscr;
     uint32_t fpexc;
-    uint32_t fpsid;
+    uint32_t fpsid; // 0x410120b4
     uint32_t base_addr;
 #if ARM_RUNTIME_PC_OFFSET
     uint32_t pc_offset;
@@ -215,6 +226,66 @@ static inline int ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_check_cc(const arm_cpu
         return 0;
     }
 #undef ARM_CPU_PERFORM_cc
+}
+
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_set_cpsr(arm_cpu_ctx* const ctx, const uint32_t value)
+{
+    // clear the bits that are "read-as-X" and then set the ones that need to be "read-as-1"
+    ctx->cpsr = (value & 0xf90f03ff) | 0x00000000;
+}
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_set_apsr(arm_cpu_ctx* const ctx, const char* flags_to_write, const uint32_t value)
+{
+    while(flags_to_write && *flags_to_write) switch(*flags_to_write++)
+    {
+    case 'N':
+        ARM_CPU_STATUS_N_SET(ctx, ARM_CPU_STATUS_bitindex(value, 31));
+        break;
+    case 'Z':
+        ARM_CPU_STATUS_Z_SET(ctx, ARM_CPU_STATUS_bitindex(value, 30));
+        break;
+    case 'C':
+        ARM_CPU_STATUS_C_SET(ctx, ARM_CPU_STATUS_bitindex(value, 29));
+        break;
+    case 'V':
+        ARM_CPU_STATUS_V_SET(ctx, ARM_CPU_STATUS_bitindex(value, 28));
+        break;
+    case 'Q':
+        ARM_CPU_STATUS_Q_SET(ctx, ARM_CPU_STATUS_bitindex(value, 27));
+        break;
+    case 'G':
+        ARM_CPU_STATUS_GE_SET(ctx, ((value >> 16) & 0xf));
+        break;
+    default:
+        break;
+    }
+}
+static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_get_apsr(const arm_cpu_ctx* const ctx, const char* flags_to_write)
+{
+    uint32_t out = 0;
+    while(flags_to_write && *flags_to_write) switch(*flags_to_write++)
+    {
+    case 'N':
+        out |= ARM_CPU_STATUS_N_GET(ctx);
+        break;
+    case 'Z':
+        out |= ARM_CPU_STATUS_Z_GET(ctx);
+        break;
+    case 'C':
+        out |= ARM_CPU_STATUS_C_GET(ctx);
+        break;
+    case 'V':
+        out |= ARM_CPU_STATUS_V_GET(ctx);
+        break;
+    case 'Q':
+        out |= ARM_CPU_STATUS_Q_GET(ctx);
+        break;
+    case 'G':
+        out |= ARM_CPU_STATUS_GE_GET(ctx);
+        break;
+    default:
+        break;
+    }
+    return out;
 }
 
 static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_compute_arm_offset(arm_cpu_ctx* const ctx, const uint32_t addr)
@@ -279,7 +350,6 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE util_rotl32(const uint32_
     c &= mask;
     return (n << c) | (n >> ((-c) & mask));
 }
-
 static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE util_rotr32(const uint32_t n, uint32_t c)
 {
     const uint32_t mask = 31;

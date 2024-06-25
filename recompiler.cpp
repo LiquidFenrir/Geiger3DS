@@ -16,7 +16,7 @@ extern "C" {
 
 #define safe_fprintf(ptr, ...) do { if(ptr) fprintf(ptr, __VA_ARGS__); } while(0)
 #define safe_fwrite(a, b, c, ptr) do { if(ptr) fwrite(a, b, c, ptr); } while(0)
-
+#define cond_printf(...) do { if(!ctx.suppress_print) printf(__VA_ARGS__); } while(0)
 using u32 = std::uint32_t;
 using u8 = std::uint8_t;
 
@@ -40,6 +40,7 @@ struct ProcessDisasmContext {
     const u32 start_addr;
     const std::span<const u8> start_code;
     const bool allow_thumb;
+    bool suppress_print{false};
 
     // mapping goes
     // ((4x) / 4) * 3 -> ARM mapping
@@ -130,7 +131,7 @@ struct ProcessDisasmContext {
                 dest.is_thumb = true;
             }
 
-            printf("Adding %s branch to 0x%08x as func? %d as thumb? %d\n", dest.is_guess ? "guess" : "", dest.addr, (int)dest.is_function_start, (int)dest.is_thumb);
+            // printf("Adding %s branch to 0x%08x as func? %d as thumb? %d\n", dest.is_guess ? "guess" : "", dest.addr, (int)dest.is_function_start, (int)dest.is_thumb);
 
             if(dest.is_thumb && !allow_thumb)
             {
@@ -140,7 +141,7 @@ struct ProcessDisasmContext {
 
             if(const auto& mapping = get_mapping(dest.addr); mapping.visited || mapping.tried)
             {
-                printf("ALREADYVISITED\n");
+                // printf("ALREADYVISITED\n");
                 continue;
             }
 
@@ -422,7 +423,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     };
 
     const char* label_kind = in_thumb_mode ? "THUMB" : "ARM";
-    printf("Entering chunk %08x in %s mode \n", entry.addr & ~1, label_kind);
+    cond_printf("Entering chunk %08x in %s mode \n", entry.addr & ~1, label_kind);
 
     int last_cmp = 0;
     int last_cmp_reg = arm_reg::ARM_REG_INVALID;
@@ -465,9 +466,9 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
 
         if(prev_addr_arm && prev_addr_arm >= ctx.start_addr && prev_addr_arm < ctx.start_addr + ctx.start_code.size())
         {
-            printf("Checking previous instruction at 0x%08x\n", prev_addr_arm);
+            cond_printf("Checking previous instruction at 0x%08x\n", prev_addr_arm);
             previous_mapping = ctx.get_mapping(prev_addr_arm);
-            printf("previous: %d %d %d\n", previous_mapping->visited, previous_mapping->tried, previous_mapping->is_unrecover_branch);
+            cond_printf("previous: %d %d %d\n", previous_mapping->visited, previous_mapping->tried, previous_mapping->is_unrecover_branch);
         }
 
         // already passed the instruction, thus the chunk
@@ -475,30 +476,30 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         // aka don't support polyglot code
         /* if(active_address != entry.addr && entry.is_guess && (mapping.is_function_start || arm_mapping.is_function_start))
         {
-            printf("reached a function start from a guess: %08x\n", (u32)insn.address);
-            printf("we were in a constant pool. discard.\n");
+            cond_printf("reached a function start from a guess: %08x\n", (u32)insn.address);
+            cond_printf("we were in a constant pool. discard.\n");
             iter_success = false;
             mapping.failed_guess = true;
             break;
         }
         else */ if(active_address == entry.addr && entry.is_guess && !entry.is_function_start && previous_mapping && previous_mapping->failed_guess)
         {
-            printf("non-function guess follows a failed guess: %08x\n", (u32)insn.address);
-            printf("assume we were in a constant pool. discard.\n");
+            cond_printf("non-function guess follows a failed guess: %08x\n", (u32)insn.address);
+            cond_printf("assume we were in a constant pool. discard.\n");
             iter_success = false;
             mapping.failed_guess = true;
             break;
         }
         else if(active_address == entry.addr && (mapping.visited || arm_mapping.visited))
         {
-            printf("already visited: %08x\n", (u32)(insn.address & ~3u));
+            cond_printf("already visited: %08x\n", (u32)(insn.address & ~3u));
             break;
         }
         
         if(cs_insn_group(*state.handle, &insn, arm_insn_group::ARM_FEATURE_IsThumb2))
         {
             // we don't have thumb2 in v6k
-            printf("thumb2 -> invalid\n");
+            cond_printf("thumb2 -> invalid\n");
             iter_success = false;
             mapping.failed_guess = true;
             break;
@@ -565,14 +566,14 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             }
             else
             {
-                printf("First instruction condition is nonsense\n");
+                cond_printf("First instruction condition is nonsense\n");
                 invalid_function_start = true;
             }
 
             if(invalid_function_start)
             {
-                printf("function start detection failed, skip chunk\n");
-                printf("FAIL REASON: 0x%08llx (%u/%llu): %s %s\n", insn.address, insn.id, insn.alias_id, insn.mnemonic, insn.op_str);
+                cond_printf("function start detection failed, skip chunk\n");
+                cond_printf("FAIL REASON: 0x%08llx (%u/%llu): %s %s\n", insn.address, insn.id, insn.alias_id, insn.mnemonic, insn.op_str);
                 mapping.failed_guess = true;
                 break;
             }
@@ -588,10 +589,18 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             ctx.initial_skip_offset = insn.address - ctx.start_addr;
         }
 
-        printf("0x%08llx (%u/%llu): %s %s\n", insn.address, insn.id, insn.alias_id, insn.mnemonic, insn.op_str);
+        cond_printf("0x%08llx (%u/%llu): %s %s\n", insn.address, insn.id, insn.alias_id, insn.mnemonic, insn.op_str);
+        for(int i = 0; i < insn.detail->arm.op_count; ++i)
+        {
+            cond_printf("op %d: type %d\n", i, insn.detail->arm.operands[i].type);
+            if(insn.detail->arm.operands[i].type == arm_op_type::ARM_OP_SYSREG)
+            {
+                cond_printf("ARM_OP_SYSREG: mclasssysreg: %04x\n", (int)insn.detail->arm.operands[i].sysop.reg.mclasssysreg);
+            }
+        }
         if(insn.detail->arm.cc == ARMCC_UNDEF)
         {
-            printf("condcode: undefined\n");
+            cond_printf("condcode: undefined\n");
         }
 
         std::string result;
@@ -623,7 +632,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     }
                     else
                     {
-                        printf("load to PC but not unconditional?\n");
+                        cond_printf("load to PC but not unconditional?\n");
                     }
                     break;
                 }
@@ -715,7 +724,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             //     const auto value = it->second.first;
             //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.start_code.size())
             //     {
-            //         printf("Identified indirect jump to %08x\n", value);
+            //         cond_printf("Identified indirect jump to %08x\n", value);
             //         ctx.add_branch(value);
             //     }
             // }
@@ -747,7 +756,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 //     const auto value = it->second.first;
                 //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.start_code.size())
                 //     {
-                //         printf("Identified indirect jump to %08x\n", value);
+                //         cond_printf("Identified indirect jump to %08x\n", value);
                 //         ctx.add_branch(value);
                 //     }
                 // }
@@ -804,9 +813,80 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         case ARM_INS_MRS:
         case ARM_INS_VMSR:
         case ARM_INS_VMRS: {
-            result += std::format("ctx->{} = ctx->{};",
-                cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
-                cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            if(insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_SYSREG)
+            {
+                std::string flags_str;
+                switch(insn.detail->arm.operands[0].sysop.reg.mclasssysreg)
+                {
+                case arm_sysreg::ARM_MCLASSSYSREG_APSR_G:
+                    flags_str = "G";
+                    break;
+                case arm_sysreg::ARM_MCLASSSYSREG_APSR_NZCVQ:
+                    flags_str = "NZCVQ";
+                    break;
+                case arm_sysreg::ARM_MCLASSSYSREG_APSR_NZCVQG:
+                    flags_str = "NZCVQG";
+                    break;
+                default:
+                    break;
+                }
+                result += std::format("arm_cpu_set_apsr(ctx, \"{}\", ctx->{});",
+                    flags_str.c_str(),
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            }
+            else if(insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_APSR)
+            {
+                result += std::format("arm_cpu_set_apsr(ctx, \"NZCVQG\", ctx->{});",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            }
+            else if(insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_APSR_NZCV)
+            {
+                result += std::format("arm_cpu_set_apsr(ctx, \"NZCV\", ctx->{});",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            }
+            else if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_SYSREG)
+            {
+                std::string flags_str;
+                switch(insn.detail->arm.operands[1].sysop.reg.mclasssysreg)
+                {
+                case arm_sysreg::ARM_MCLASSSYSREG_APSR_G:
+                    flags_str = "G";
+                    break;
+                case arm_sysreg::ARM_MCLASSSYSREG_APSR_NZCVQ:
+                    flags_str = "NZCVQ";
+                    break;
+                case arm_sysreg::ARM_MCLASSSYSREG_APSR_NZCVQG:
+                    flags_str = "NZCVQG";
+                    break;
+                default:
+                    break;
+                }
+                result += std::format("ctx->{} = arm_cpu_get_apsr(ctx, \"{}\");",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
+                    flags_str.c_str());
+            }
+            else if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_APSR_NZCV)
+            {
+                result += std::format("ctx->{} = arm_cpu_get_apsr(ctx, \"NZCV\");",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+            }
+            else if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_APSR)
+            {
+                result += std::format("ctx->{} = arm_cpu_get_apsr(ctx, \"NZCVQG\");",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+            }
+            else if(insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_CPSR)
+            {
+                // writes to cpsr need to keep some reserved bits, so reads can be simplified
+                result += std::format("arm_cpu_set_cpsr(ctx, ctx->{});",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            }
+            else
+            {
+                result += std::format("ctx->{} = ctx->{};",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            }
             break;
         }
 
@@ -878,7 +958,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + it->second;
                     if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
                     {
-                        printf("found 2-step function pointer: 0x%08x (from offset at 0x%08x)\n", pointer, it->second);
+                        cond_printf("found 2-step function pointer: 0x%08x (from offset at 0x%08x)\n", pointer, it->second);
                         ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
                     }
                     last_known_reg_from_pc_value.erase(it);
@@ -892,10 +972,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
                     if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
                     {
-                        printf("found ADR (add)! 0x%08x\n", pointer);
+                        cond_printf("found ADR (add)! 0x%08x\n", pointer);
                         if(last_adr_reg_used != arm_reg::ARM_REG_INVALID) // if there was an ADR before this one
                         {
-                            printf("ADR complete! 0x%08llx\n", last_adr_value);
+                            cond_printf("ADR complete! 0x%08llx\n", last_adr_value);
                             ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
                             ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
                         }
@@ -908,10 +988,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) - insn.detail->arm.operands[2].imm;
                     if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
                     {
-                        printf("found ADR (sub)! 0x%08x\n", pointer);
+                        cond_printf("found ADR (sub)! 0x%08x\n", pointer);
                         if(last_adr_reg_used != arm_reg::ARM_REG_INVALID) // if there was an ADR before this one
                         {
-                            printf("ADR complete! 0x%08llx\n", last_adr_value);
+                            cond_printf("ADR complete! 0x%08llx\n", last_adr_value);
                             ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
                             ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
                         }
@@ -921,7 +1001,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 }
                 else
                 {
-                    printf("looks like ADR? not quite\n");
+                    cond_printf("looks like ADR? not quite\n");
                 }
             }
             // if we are in a continued ADR (ADRL)
@@ -930,12 +1010,12 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 if(insn.id == ARM_INS_ADD)
                 {
                     last_adr_value += insn.detail->arm.operands[2].imm;
-                    printf("found ADRL (add)! 0x%08llx\n", last_adr_value);
+                    cond_printf("found ADRL (add)! 0x%08llx\n", last_adr_value);
                 }
                 else if(insn.id == ARM_INS_SUB)
                 {
                     last_adr_value -= insn.detail->arm.operands[2].imm;
-                    printf("found ADRL (sub)! 0x%08llx\n", last_adr_value);
+                    cond_printf("found ADRL (sub)! 0x%08llx\n", last_adr_value);
                 }
             }
             break;
@@ -1007,7 +1087,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             if(insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC)
             {
                 const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
-                printf("found emulated bl! 0x%08x\n", pointer);
+                cond_printf("found emulated bl! 0x%08x\n", pointer);
                 ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
             }
             break;
@@ -1313,13 +1393,13 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             )
             {
                 const int last_cmp_imm_offset = (insn.detail->arm.cc == ARMCC_LS) ? 1 : 0;
-                printf("switch statement detected: %lld entries\n", (last_cmp_imm + last_cmp_imm_offset));
+                cond_printf("switch statement detected: %lld entries\n", (last_cmp_imm + last_cmp_imm_offset));
                 for(int64_t index = 0; index < (last_cmp_imm + last_cmp_imm_offset); ++index)
                 {
                     u32 value = 0;
                     const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + index * 4;
                     std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer & ~1)], 4);
-                    printf("Entry %lld (0x%08x): 0x%08x\n", index, pointer, value);
+                    cond_printf("Entry %lld (0x%08x): 0x%08x\n", index, pointer, value);
                     auto& entry_mapping = ctx.get_mapping(pointer);
                     entry_mapping.tried = true;
                     entry_mapping.jumptable_entry = true;
@@ -1334,7 +1414,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 && insn.detail->arm.operands[1].mem.index == arm_reg::ARM_REG_INVALID
             )
             {
-                printf("register set detected: from pc[%d:+4]\n", insn.detail->arm.operands[1].mem.disp);
+                cond_printf("register set detected: from pc[%d:+4]\n", insn.detail->arm.operands[1].mem.disp);
                 u32 value = 0;
                 const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[1].mem.disp;
                 std::memcpy(&value, &ctx.start_code[ctx.get_offset(pointer & ~1)], 4);
@@ -1345,7 +1425,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     ctx.get_mapping(value).has_adr_start = value;
                     if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
                     {
-                        printf("Maybe identified function pointer to %08x\n", value);
+                        cond_printf("Maybe identified function pointer to %08x\n", value);
                         // would need to check LR being set before to be suire about is_function_start
                         ctx.add_guess_branch({(u32)(value), false, false, false});
                     }
@@ -1354,7 +1434,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             // direct load to PC
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC && insn.detail->arm.cc == ARMCC_AL)
             {
-                printf("ldr as return detected\n");
+                cond_printf("ldr as return detected\n");
                 uncond_branch = true;
                 mapping.is_unrecover_branch = true;
             }
@@ -1523,7 +1603,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         {
             if (ctx.start_addr + ctx.initial_skip_offset <= (u32)last_adr_value && (u32)last_adr_value < ctx.start_addr + ctx.start_code.size())
             {
-                printf("ADR complete: 0x%08llx\n", last_adr_value);
+                cond_printf("ADR complete: 0x%08llx\n", last_adr_value);
                 ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
                 ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
             }
@@ -1538,7 +1618,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         ctx.insn_temp_list.emplace_back(active_address, std::move(result));
         if(uncond_branch)
         {
-            printf("Unconditional branch detected, stop.\n");
+            cond_printf("Unconditional branch detected, stop.\n");
             break;
         }
     }
@@ -1546,7 +1626,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     if(!iter_success)
     {
         // discards chunk
-        printf("exit from failure to disas\n");
+        cond_printf("exit from failure to disas\n");
         for(auto& temp_insn : ctx.insn_temp_list)
         {
             auto& mapping = ctx.get_mapping(temp_insn.first);
@@ -1575,7 +1655,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
 {
     ProcessDisasmContext ctx{.start_addr = start_addr, .start_code = start_code, .allow_thumb = allow_thumb};
 
-    printf("Checking initial pointer: %08x\n", start_addr);
+    cond_printf("Checking initial pointer: %08x\n", start_addr);
     ctx.add_branch({start_addr, false, false, true});
     ctx.commit_branches();
     do {
@@ -1632,7 +1712,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         {
             if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
             {
-                printf("Checking text pointer (%08x): %08x\n", analyzed_addr, value);
+                cond_printf("Checking text pointer (%08x): %08x\n", analyzed_addr, value);
                 ctx.add_guess_branch({value, false, false, false});
             }
         }
@@ -1641,7 +1721,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         {
             if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
             {
-                printf("Checking text offset pointer (%08x): %08x\n", analyzed_addr, value);
+                cond_printf("Checking text offset pointer (%08x): %08x\n", analyzed_addr, value);
                 ctx.add_guess_branch({value, false, false, false});
             }
         }
@@ -1678,7 +1758,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             {
                 if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
                 {
-                    printf("Checking text array pointer with base %08x (%08x): %08x\n", current_mapping.has_adr_start, analyzed_addr, value);
+                    cond_printf("Checking text array pointer with base %08x (%08x): %08x\n", current_mapping.has_adr_start, analyzed_addr, value);
                     if((i + 1) < (start_code.size() / 4))
                     {
                         auto& next_mapping = ctx.analyzed[(i + 1) * 3];
@@ -1692,7 +1772,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         }
 
         had_branches = !ctx.branches_temp_list.empty();
-        printf("had_branches: %d\n", (int)had_branches);
+        cond_printf("had_branches: %d\n", (int)had_branches);
         ctx.commit_branches();
         while(!ctx.branches.empty())
         {
@@ -1713,12 +1793,12 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             if(unvisited_ongoing)
             {
                 unvisited_ongoing = false;
-                printf("unvisited: %08x - %08x (length %08x)", unvisited_start, start_addr + i * 4, start_addr + i * 4 - unvisited_start);
+                cond_printf("unvisited: %08x - %08x (length %08x)", unvisited_start, start_addr + i * 4, start_addr + i * 4 - unvisited_start);
                 if(ctx.analyzed[i * 3].jumptable_entry)
                 {
-                    printf(" (is jump table entry)");
+                    cond_printf(" (is jump table entry)");
                 }
-                printf("\n");
+                cond_printf("\n");
             }
         }
         else if(!unvisited_ongoing)
@@ -1730,24 +1810,24 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     if(unvisited_ongoing)
     {
         unvisited_ongoing = false;
-        printf("unvisited: %08x - %08x (length %08x)", unvisited_start, (u32)start_code.size(), (u32)(start_code.size() - unvisited_start));
-        printf("\n");
+        cond_printf("unvisited: %08x - %08x (length %08x)", unvisited_start, (u32)start_code.size(), (u32)(start_code.size() - unvisited_start));
+        cond_printf("\n");
     }
 
     for(u32 i = 0; i < start_code.size() / 4; ++i)
     {
         if(ctx.analyzed[i * 3 + 1].visited)
         {
-            printf("visited thumb: %08x\n", start_addr + i * 4);
+            cond_printf("visited thumb: %08x\n", start_addr + i * 4);
         }
         if(ctx.analyzed[i * 3 + 2].visited)
         {
-            printf("visited thumb: %08x\n", start_addr + i * 4 + 2);
+            cond_printf("visited thumb: %08x\n", start_addr + i * 4 + 2);
         }
     }
 
-    printf("Final insn_temp_list capacity: %zd\n", ctx.insn_temp_list.capacity());
-    printf("Final branches_temp_list capacity: %zd\n", ctx.branches_temp_list.capacity());
+    cond_printf("Final insn_temp_list capacity: %zd\n", ctx.insn_temp_list.capacity());
+    cond_printf("Final branches_temp_list capacity: %zd\n", ctx.branches_temp_list.capacity());
 
     const std::string source_file_path = filename + ".src.c";
     const std::string labels_arm_file_path = filename + ".lab.arm.c";
@@ -1788,7 +1868,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         {
             if(ctx.get_mapping(insn_addr_previous).visited)
             {
-                printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
+                cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
             safe_fprintf(labels_arm_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
         }
@@ -1812,7 +1892,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         {
             if(ctx.get_mapping(insn_addr_previous + 1).visited)
             {
-                printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
+                cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
             safe_fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
         }
@@ -1878,11 +1958,11 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-    printf("Hello, world!\n");
+    // printf("Hello, world!\n");
 
     auto seg_code = load_data(argv[1]);
     auto seg_rodata = load_data(argv[2]);
     auto seg_data = load_data(argv[3]);
 
-    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, false);
+    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, true);
 }

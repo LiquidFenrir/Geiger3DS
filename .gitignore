@@ -8,3 +8,4 @@ capstone-build/
 *.lab.arm.c
 *.lab.thumb.c
 capstone/
+3ds-examples/
