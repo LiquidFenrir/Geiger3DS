@@ -511,9 +511,9 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
 
         if(prev_addr_arm && prev_addr_arm >= ctx.start_addr && prev_addr_arm < ctx.start_addr + ctx.start_code.size())
         {
-            cond_printf("Checking previous instruction at 0x%08x\n", prev_addr_arm);
+            // cond_printf("Checking previous instruction at 0x%08x\n", prev_addr_arm);
             previous_mapping = ctx.get_mapping(prev_addr_arm);
-            cond_printf("previous: %d %d %d\n", previous_mapping->visited, previous_mapping->tried, previous_mapping->is_unrecover_branch);
+            // cond_printf("previous: %d %d %d\n", previous_mapping->visited, previous_mapping->tried, previous_mapping->is_unrecover_branch);
         }
 
         // already passed the instruction, thus the chunk
@@ -641,14 +641,14 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
 
         cond_printf("0x%08llx (%u/%llu): %s %s\n", insn.address, insn.id, insn.alias_id, insn.mnemonic, insn.op_str);
-        for(int i = 0; i < insn.detail->arm.op_count; ++i)
-        {
-            cond_printf("op %d: type %d\n", i, insn.detail->arm.operands[i].type);
-            if(insn.detail->arm.operands[i].type == arm_op_type::ARM_OP_SYSREG)
-            {
-                cond_printf("ARM_OP_SYSREG: mclasssysreg: %04x\n", (int)insn.detail->arm.operands[i].sysop.reg.mclasssysreg);
-            }
-        }
+        // for(int i = 0; i < insn.detail->arm.op_count; ++i)
+        // {
+        //     cond_printf("op %d: type %d\n", i, insn.detail->arm.operands[i].type);
+        //     if(insn.detail->arm.operands[i].type == arm_op_type::ARM_OP_SYSREG)
+        //     {
+        //         cond_printf("ARM_OP_SYSREG: mclasssysreg: %04x\n", (int)insn.detail->arm.operands[i].sysop.reg.mclasssysreg);
+        //     }
+        // }
         if(insn.detail->arm.cc == ARMCC_UNDEF)
         {
             cond_printf("condcode: undefined\n");
@@ -1053,6 +1053,8 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     {
                         append_offset = MAKE_APPEND_OFFSET(int16_t);
                     }
+
+                    last_ldr_offset_for_switch_type = "";
 
                     for(int64_t index = 0; index < last_ldr_offset_for_switch_max_offset; ++index)
                     {
@@ -1602,9 +1604,12 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             )
             {
                 u32 value = 0;
-                const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[1].mem.disp;
+                const int64_t disp = insn.detail->arm.operands[1].subtracted
+                    ? -insn.detail->arm.operands[1].mem.disp
+                    : insn.detail->arm.operands[1].mem.disp;
+                const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + disp;
                 std::memcpy(&value, ctx.get_from_pointer(pointer, 4).data(), 4);
-                cond_printf("register set detected: from pc[%d:+4] == %08x @ %08x\n", insn.detail->arm.operands[1].mem.disp, value, pointer);
+                cond_printf("register set detected: from pc[%lld:+4] == %08x @ %08x\n", disp, value, pointer);
                 last_known_reg_from_pc_value[(arm_reg)insn.detail->arm.operands[0].reg] = value;
                 // HACK: if the set value looks like a pointer to code, add it to the queue
                 if (ctx.start_addr + ctx.initial_skip_offset <= value && value < ctx.start_addr + ctx.start_code.size())
@@ -1721,7 +1726,6 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             else
                 result += std::format("ctx->{}", cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.index));
             result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
-            break;
             break;
         }
         
