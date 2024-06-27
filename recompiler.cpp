@@ -1203,7 +1203,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 }
             }
             
-            if(insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC)
+            if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC)
             {
                 const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
                 cond_printf("found emulated bl! 0x%08x\n", pointer);
