@@ -4,6 +4,7 @@ capstone-build/
 *.elf
 *.txt
 *.pdf
+*.gen.s
 *.src.c
 *.lab.arm.c
 *.lab.thumb.c

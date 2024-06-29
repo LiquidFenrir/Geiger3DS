@@ -1,5 +1,9 @@
 #include <stdint.h>
 #include <stddef.h>
+#include <immintrin.h>
+
+typedef float f32_t;
+typedef double f64_t;
 
 #define ATTR_FORCE_INLINE __attribute__((__always_inline__))
 #define ATTR_NORETURN __attribute__((__noreturn__))
@@ -30,7 +34,9 @@ typedef enum arm_cpu_cc {
   arm_cpu_cc_undef = 15, // Undefined
 } arm_cpu_cc;
 
-#define ARM_CPU_STATUS_get(cpsr, bitindex) ((cpsr) & (1u << (bitindex)))
+#define ARM_CPU_STATUS_value_shifted_in(value, bitindex) ((value) << (bitindex))
+#define ARM_CPU_STATUS_value_shifted_out(value, mask, bitindex) (((value) >> (bitindex)) & (mask))
+#define ARM_CPU_STATUS_get(cpsr, bitindex) ((cpsr) & ARM_CPU_STATUS_value_shifted_in(1u, bitindex))
 
 #define ARM_CPU_STATUS_N_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 31)
 #define ARM_CPU_STATUS_Z_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 30)
@@ -38,7 +44,7 @@ typedef enum arm_cpu_cc {
 #define ARM_CPU_STATUS_V_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 28)
 #define ARM_CPU_STATUS_Q_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 27)
 #define ARM_CPU_STATUS_T_GET(ctx) ARM_CPU_STATUS_get((ctx)->cpsr, 5)
-#define ARM_CPU_STATUS_GE_GET(ctx) (((ctx)->cpsr) & 0x000f0000)
+#define ARM_CPU_STATUS_GE_GET(ctx) (((ctx)->cpsr) & ARM_CPU_STATUS_value_shifted_in(0xfu, 16))
 
 #define ARM_CPU_STATUS_bitindex(cpsr, bitindex) (int)(ARM_CPU_STATUS_get(cpsr, bitindex) != 0)
 
@@ -48,18 +54,31 @@ typedef enum arm_cpu_cc {
 #define ARM_CPU_STATUS_V(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 28)
 #define ARM_CPU_STATUS_Q(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 27)
 #define ARM_CPU_STATUS_T(ctx) ARM_CPU_STATUS_bitindex((ctx)->cpsr, 5)
-#define ARM_CPU_STATUS_GE(ctx) (((ctx)->cpsr >> 16) & 0xf)
+#define ARM_CPU_STATUS_GE(ctx) ARM_CPU_STATUS_value_shifted_out((ctx)->cpsr, 0xfu, 16)
 
-#define ARM_CPU_STATUS_set(ctx, new_flag, bitindex) (((ctx)->cpsr & ~(1u << (bitindex))) | (new_flag << (bitindex)))
+#define ARM_FPU_STATUS_LEN(ctx) (ARM_CPU_STATUS_value_shifted_out((ctx)->fpscr, 0x7u, 16) + 1)
+#define ARM_FPU_STATUS_STRIDE(ctx) ((ARM_CPU_STATUS_value_shifted_out((ctx)->fpscr, 0x3u, 20) == 0x3u) ? 2 : 1)
+#define ARM_FPU_STATUS_ROUNDING_MODE(ctx) (ARM_CPU_STATUS_value_shifted_out((ctx)->fpscr, 0x3u, 22))
+// return default NaN if any instruction takes/generates any NaN
+// f32: 0x7fc00000
+// f64: 0x7fc0000000000000
+#define ARM_FPU_STATUS_DEFAULT_NAN(ctx) ARM_CPU_STATUS_bitindex((ctx)->fpscr, 25)
+#define ARM_FPU_STATUS_FLUSH_DENORM_ZERO(ctx) ARM_CPU_STATUS_bitindex((ctx)->fpscr, 24)
 
-#define ARM_CPU_STATUS_N_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 31)
-#define ARM_CPU_STATUS_Z_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 30)
-#define ARM_CPU_STATUS_C_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 29)
-#define ARM_CPU_STATUS_V_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 28)
-#define ARM_CPU_STATUS_Q_SET(ctx, new_flag) ARM_CPU_STATUS_set(ctx, new_flag, 27)
-#define ARM_CPU_STATUS_GE_SET(ctx, new_value) (((ctx)->cpsr & ~0x000f0000) | (((new_value) & 0xf) << 16))
+#define ARM_CPU_STATUS_set(cpsr, new_flag, bitindex) (((cpsr) & ~ARM_CPU_STATUS_value_shifted_in(1u, bitindex)) | ARM_CPU_STATUS_value_shifted_in(new_flag, bitindex))
+
+#define ARM_CPU_STATUS_N_SET(ctx, new_flag) ARM_CPU_STATUS_set((ctx)->cpsr, new_flag, 31)
+#define ARM_CPU_STATUS_Z_SET(ctx, new_flag) ARM_CPU_STATUS_set((ctx)->cpsr, new_flag, 30)
+#define ARM_CPU_STATUS_C_SET(ctx, new_flag) ARM_CPU_STATUS_set((ctx)->cpsr, new_flag, 29)
+#define ARM_CPU_STATUS_V_SET(ctx, new_flag) ARM_CPU_STATUS_set((ctx)->cpsr, new_flag, 28)
+#define ARM_CPU_STATUS_Q_SET(ctx, new_flag) ARM_CPU_STATUS_set((ctx)->cpsr, new_flag, 27)
+#define ARM_CPU_STATUS_GE_SET(ctx, new_value) (((ctx)->cpsr & ~ARM_CPU_STATUS_value_shifted_in(0xfu, 16)) | ARM_CPU_STATUS_value_shifted_in(new_value, 16))
 // #define ARM_CPU_STATUS_T_SET(ctx, value) ((ctx)->cpsr = ((((ctx)->cpsr) & ~(1u << 5)) | ((uint32_t)(value != 0) << 5)))
 
+typedef struct arm_fpu_bank {
+    uint8_t index;
+    uint8_t offset;
+} arm_fpu_bank;
 typedef struct arm_cpu_ctx {
     union {
         struct {
@@ -148,6 +167,7 @@ typedef struct arm_cpu_ctx {
         };
         union {
             double f64_banks[4][4];
+
             struct {
                 double d0;
                 double d1;
@@ -181,6 +201,7 @@ typedef struct arm_cpu_ctx {
     uint32_t pc_offset;
 #endif
     uint32_t thread_id;
+    uint32_t mxcsr_value;
     // [0, ..., N)
     uint32_t cpu_id;
     uint32_t num_cpus;
@@ -198,6 +219,32 @@ typedef struct arm_cpu_ctx {
 // and so on for different lengths of 'arguments' tuple
 #define ARGEXTRACT_DO(...) ARGEXTRACT_DO_(__VA_ARGS__)
 #define ARGEXTRACT_DO_(...) __VA_ARGS__##_END
+
+#if 1
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_get_mxcsr(uint32_t* const into)
+{
+    *into = _mm_getcsr();
+}
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_set_mxcsr(const uint32_t* const from)
+{
+    _mm_setcsr(*from);
+}
+#else
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_get_mxcsr(uint32_t* const into)
+{
+    __asm__ __volatile__ ("stmxcsr %0"
+        : "=m"(*into)
+        : /* No inputs */
+        : "memory");
+}
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_set_mxcsr(const uint32_t* const from)
+{
+    __asm__ __volatile__ ("ldmxcsr %0"
+        : /* No outputs */
+        : "m"(*from)
+        : "cc");
+}
+#endif
 
 static inline int ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_check_cc(const arm_cpu_ctx* const ctx, const arm_cpu_cc cc)
 {
@@ -232,6 +279,32 @@ static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_set_cpsr(arm_cpu_ctx*
 {
     // clear the bits that are "read-as-X" and then set the ones that need to be "read-as-1"
     ctx->cpsr = (value & 0xf90f03ff) | 0x00000000;
+}
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_set_fpscr(arm_cpu_ctx* const ctx, const uint32_t value)
+{
+    ctx->fpscr = value;
+    util_get_mxcsr(&ctx->mxcsr_value);
+    ctx->mxcsr_value &= ~0xe000u;
+    switch(ARM_FPU_STATUS_ROUNDING_MODE(ctx))
+    {
+    case 0: // to nearest
+        ctx->mxcsr_value |= 0x0000;
+        break;
+    case 1: // to +inf
+        ctx->mxcsr_value |= 0x4000;
+        break;
+    case 2: // to -inf
+        ctx->mxcsr_value |= 0x2000;
+        break;
+    case 3: // to 0
+        ctx->mxcsr_value |= 0x6000;
+        break;
+    default:
+        break;
+    }
+    if(ARM_FPU_STATUS_FLUSH_DENORM_ZERO(ctx))
+        ctx->mxcsr_value |= 0x8000;
+    util_set_mxcsr(&ctx->mxcsr_value);
 }
 static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_set_apsr(arm_cpu_ctx* const ctx, const char* flags_to_write, const uint32_t value)
 {
@@ -327,6 +400,109 @@ static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_update_pc(volatile ar
     pc_offset;
 }
 
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_get_f32_defaultNaN(float* const into)
+{
+    *(uint32_t*)into = 0x7fc00000u;
+}
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_get_f64_defaultNaN(double* const into)
+{
+    *(uint64_t*)into = 0x7fc0000000000000ull;
+}
+static inline int ATTR_FASTCALL ATTR_FORCE_INLINE util_f32_isNaN(const float* const value)
+{
+    // const uint32_t value_cmp = (0x7fffffffu & *(const uint32_t*)value);
+    // return value_cmp > 0x7f800000u;
+    return *value != *value;
+}
+static inline int ATTR_FASTCALL ATTR_FORCE_INLINE util_f64_isNaN(const double* const value)
+{
+    // const uint64_t value_cmp = (0x7fffffffffffffffull & *(const uint64_t*)value);
+    // return value_cmp > 0x7ff0000000000000ull;
+    return *value != *value;
+}
+static inline int ATTR_FASTCALL ATTR_FORCE_INLINE util_f32_isDenormal(const float* const value)
+{
+    const uint32_t value_cmp = (0x7fffffffu & *(const uint32_t*)value);
+    return value_cmp != 0 /* not zero */ && (value_cmp & 0x7f800000u) == 0 /* not normal/NaN/inf */;
+}
+static inline int ATTR_FASTCALL ATTR_FORCE_INLINE util_f64_isDenormal(const double* const value)
+{
+    const uint64_t value_cmp = (0x7fffffffffffffffull & *(const uint64_t*)value);
+    return value_cmp != 0 /* not zero */ && (value_cmp & 0x7ff0000000000000ull) == 0 /* not normal/NaN/inf */;
+}
+
+#define _mm_sqrt_sd(v) _mm_sqrt_sd(_mm_undefined_pd(), (v))
+#define MAKE_UTILS_FOR_FLOAT_TYPE(float_type, float_suffix_std,  float_vector_type, float_suffix_intr) \
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vcmp(arm_cpu_ctx* const ctx, const float_type##_t lhs, const float_type##_t rhs) \
+{ \
+    const float_vector_type lhs_vec = _mm_load_s##float_suffix_intr(&lhs); \
+    const float_vector_type rhs_vec = _mm_load_s##float_suffix_intr(&rhs); \
+    const unsigned res_lt = _mm_cvts##float_suffix_intr##_##float_type(_mm_cmp_s##float_suffix_intr(lhs_vec, rhs_vec, _CMP_LT_OQ)) != 0; \
+    const unsigned res_eq = _mm_cvts##float_suffix_intr##_##float_type(_mm_cmp_s##float_suffix_intr(lhs_vec, rhs_vec, _CMP_EQ_OQ)) != 0; \
+    const unsigned res_geu = _mm_cvts##float_suffix_intr##_##float_type(_mm_cmp_s##float_suffix_intr(lhs_vec, rhs_vec, _CMP_NLT_UQ)) != 0; \
+    const unsigned res_u = _mm_cvts##float_suffix_intr##_##float_type(_mm_cmp_s##float_suffix_intr(lhs_vec, rhs_vec, _CMP_UNORD_Q)) != 0; \
+    ARM_CPU_STATUS_set((ctx)->fpscr, res_lt, 31); \
+    ARM_CPU_STATUS_set((ctx)->fpscr, res_eq, 30); \
+    ARM_CPU_STATUS_set((ctx)->fpscr, res_geu, 29); \
+    ARM_CPU_STATUS_set((ctx)->fpscr, res_u, 28); \
+} \
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vcmpe(arm_cpu_ctx* const ctx, const float_type##_t lhs, const float_type##_t rhs) \
+{ \
+    /* should raise exception (invalid operation) on NaN, don't care so just stub as a normal vcmp */ \
+    util_##float_type##_vcmp(ctx, lhs, rhs); \
+} \
+static inline float_type##_t ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vsqrt(const float_type##_t value) \
+{ \
+    return _mm_cvts##float_suffix_intr##_##float_type(_mm_sqrt_s##float_suffix_intr(_mm_load_s##float_suffix_intr(&value))); \
+} \
+static inline float_type##_t ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vabs(const float_type##_t value) \
+{ \
+    return __builtin_fabs##float_suffix_std(value); \
+} \
+static inline float_type##_t ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vneg(const float_type##_t value) \
+{ \
+    return -(value); \
+} \
+static inline float_type##_t ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vadd(const float_type##_t lhs, const float_type##_t rhs) \
+{ \
+    return lhs + rhs; \
+} \
+static inline float_type##_t ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vsub(const float_type##_t lhs, const float_type##_t rhs) \
+{ \
+    return lhs - rhs; \
+} \
+static inline float_type##_t ATTR_FASTCALL ATTR_FORCE_INLINE util_##float_type##_vdiv(const float_type##_t lhs, const float_type##_t rhs) \
+{ \
+    return lhs / rhs; \
+} \
+static inline float_type##_t ATTR_FASTCALL ATTR_FORCE_INLINE util_get_##float_type##_in_bank(const arm_cpu_ctx* const ctx, const arm_fpu_bank bank, int* const cumulative_nan) \
+{ \
+    float_type##_t out = ctx->float_type##_banks[bank.index][bank.offset]; \
+    if(ARM_FPU_STATUS_DEFAULT_NAN(ctx) && util_##float_type##_isNaN(&out)) \
+    { \
+        *cumulative_nan = 1; \
+    } \
+    else if(ARM_FPU_STATUS_FLUSH_DENORM_ZERO(ctx) && util_##float_type##_isDenormal(&out)) \
+    { \
+        out = 0; \
+    } \
+    return out; \
+} \
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE util_set_##float_type##_in_bank(arm_cpu_ctx* const ctx, const arm_fpu_bank bank, const float_type##_t value, const int* const cumulative_nan) \
+{ \
+    if(ARM_FPU_STATUS_DEFAULT_NAN(ctx) && (*cumulative_nan == 1 || util_##float_type##_isNaN(&value)) && *cumulative_nan != -1) \
+    { \
+        util_get_##float_type##_defaultNaN(&ctx->float_type##_banks[bank.index][bank.offset]); \
+    } \
+    else \
+    { \
+        ctx->float_type##_banks[bank.index][bank.offset] = value; \
+    } \
+}
+
+MAKE_UTILS_FOR_FLOAT_TYPE(f32, f, __m128, s)
+MAKE_UTILS_FOR_FLOAT_TYPE(f64, , __m128d, d)
+
 static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_instr_svc(arm_cpu_ctx* const ctx, const int64_t svc_id)
 {
     __asm__ __volatile__ ("int3"
@@ -339,9 +515,9 @@ static inline void ATTR_FASTCALL ATTR_NORETURN ATTR_FORCE_INLINE arm_cpu_instr_r
     arm_cpu_instr_svc(ctx, -1);
     __builtin_unreachable();
 }
-static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_instr_udf(arm_cpu_ctx* const ctx, const int64_t udf_id)
+static inline void ATTR_FASTCALL ATTR_FORCE_INLINE arm_cpu_instr_udf(arm_cpu_ctx* const ctx, const int32_t udf_id)
 {
-    arm_cpu_instr_svc(ctx, -(16 + udf_id));
+    arm_cpu_instr_svc(ctx, -(16ll + udf_id));
 }
 
 static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE util_rotl32(const uint32_t n, uint32_t c)
@@ -406,7 +582,7 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_RRX(arm_c
     return (value >> 1) | (current_carry << 31);
 }
 
-static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_ASR_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, uint8_t shift)
+static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_asr_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, uint8_t shift)
 {
     if(shift == 0) return value;
     if(shift >= 32)
@@ -428,7 +604,7 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_ASR_REG(a
         return output;
     }
 }
-static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_LSL_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, const uint8_t shift)
+static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_lsl_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, const uint8_t shift)
 {
     if(shift == 0) return value;
     if(shift >= 32)
@@ -456,7 +632,7 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_LSL_REG(a
         return output;
     }
 }
-static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_LSR_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, const uint8_t shift)
+static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_lsr_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, const uint8_t shift)
 {
     if(shift == 0) return value;
     if(shift >= 32)
@@ -484,7 +660,7 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_LSR_REG(a
         return output;
     }
 }
-static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_ROR_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, const uint8_t shift)
+static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ctx, const uint32_t value, const int update_flags, const uint8_t shift)
 {
     if(shift == 0) return value;
     if(shift % 32 == 0)
@@ -868,7 +1044,7 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_clz(arm_c
 } while(0)
 
 #define ARM_CPU_PERFORM_MLA(ctx, set_flags, destination, argA, argB, addend) do { \
-    const uint32_t result = argA * argB + addend; \
+    const uint32_t result = ((argA) * (argB)) + addend; \
     if(set_flags) arm_cpu_update_flags_NZ_32(ctx, result); \
     destination = result; \
 } while(0)
@@ -883,9 +1059,9 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_clz(arm_c
 } while(0)
 
 #define ARM_CPU_PERFORM_xMLAL(ctx, base_type, set_flags, destLo, destHi, argA, argB) do { \
-    const uint64_t result = (uint64_t)((base_type)argA * (base_type)argB); \
+    const uint64_t mul_result = (uint64_t)((base_type)argA * (base_type)argB); \
     const uint64_t existing = ((uint64_t)destHi << 32) | (uint64_t)destLo; \
-    const uint64_t result = existing + result_mul; \
+    const uint64_t result = existing + mul_result; \
     if(set_flags) arm_cpu_update_flags_NZ_64(ctx, result); \
     destLo = (uint32_t)(result & 0xffffffff); \
     destHi = (uint32_t)((result >> 32) & 0xffffffff); \
@@ -1011,4 +1187,76 @@ static inline uint32_t ATTR_FASTCALL ATTR_FORCE_INLINE ARM_CPU_PERFORM_clz(arm_c
     if(opcodeA == 0 && opcodeB == 3 && coproc_regA == 13 && coproc_regB == 0) \
         source = ctx->cp15.thread_upro; \
     else goto LABEL_ARM_error; \
+} while(0)
+
+#define ARM_FPU_PERFORM_VMUL_ALL(ctx, float_type, bank_size, sum_preop, mul_postop, dest_bank_index, dest_bank_offset, lhs_bank_index, lhs_bank_offset, rhs_bank_index, rhs_bank_offset) do { \
+    const uint8_t len = (dest_bank_index == 0) ? 1 : ARM_FPU_STATUS_LEN(ctx); \
+    const uint8_t stride = ARM_FPU_STATUS_STRIDE(ctx); \
+    const uint8_t rhs_stride = rhs_bank_index == 0 ? 0 : stride; \
+    arm_fpu_bank dst = {.index = dest_bank_index, .offset = dest_bank_offset}; \
+    arm_fpu_bank lhs = {.index = lhs_bank_index, .offset = lhs_bank_offset}; \
+    arm_fpu_bank rhs = {.index = rhs_bank_index, .offset = rhs_bank_offset}; \
+    for(uint8_t ctr = 0; ctr < len; \
+        dst.offset = (dst.offset + stride) % bank_size, lhs.offset = (lhs.offset + stride) % bank_size, rhs.offset = (rhs.offset + rhs_stride) % bank_size, ++ctr \
+    ) \
+    { \
+        int cumulative_nan = 0; \
+        if(*#sum_preop == '\0') \
+            util_set_##float_type##_in_bank(ctx, dst, mul_postop \
+                (util_get_##float_type##_in_bank(ctx, lhs, &cumulative_nan) * util_get_##float_type##_in_bank(ctx, rhs, &cumulative_nan)), \
+            &cumulative_nan);\
+        else \
+            util_set_##float_type##_in_bank(ctx, dst, sum_preop (util_get_##float_type##_in_bank(ctx, dst, &cumulative_nan)) mul_postop \
+                (util_get_##float_type##_in_bank(ctx, lhs, &cumulative_nan) * util_get_##float_type##_in_bank(ctx, rhs, &cumulative_nan)), \
+            &cumulative_nan); \
+    } \
+} while(0)
+
+#define ARM_FPU_PERFORM_OP1_ALL(ctx, action, float_type, bank_size, dest_bank_index, dest_bank_offset, op_bank_index, op_bank_offset) do { \
+    const uint8_t len = (dest_bank_index == 0) ? 1 : ARM_FPU_STATUS_LEN(ctx); \
+    const uint8_t stride = ARM_FPU_STATUS_STRIDE(ctx); \
+    const uint8_t op_stride = op_bank_index == 0 ? 0 : stride; \
+    arm_fpu_bank dst = {.index = dest_bank_index, .offset = dest_bank_offset}; \
+    arm_fpu_bank op = {.index = op_bank_index, .offset = op_bank_offset}; \
+    for(uint8_t ctr = 0; ctr < len; \
+        dst.offset = (dst.offset + stride) % bank_size, op.offset = (op.offset + op_stride) % bank_size, ++ctr \
+    ) \
+    { \
+        int cumulative_nan = 0; \
+        if((#action)[4] == '\0') \
+        { /* vneg or vabs, keeps NaN values */ \
+            const int cumulative_nan_use = -1; \
+            util_set_##float_type##_in_bank(ctx, dst, \
+                util_##float_type##_##action( \
+                    util_get_##float_type##_in_bank(ctx, op, &cumulative_nan) \
+                ), &cumulative_nan_use); \
+        } \
+        else \
+        { \
+            util_set_##float_type##_in_bank(ctx, dst, \
+                util_##float_type##_##action( \
+                    util_get_##float_type##_in_bank(ctx, op, &cumulative_nan) \
+                ), &cumulative_nan); \
+        } \
+    } \
+} while(0)
+
+#define ARM_FPU_PERFORM_ARITH_ALL(ctx, action, float_type, bank_size, dest_bank_index, dest_bank_offset, lhs_bank_index, lhs_bank_offset, rhs_bank_index, rhs_bank_offset) do { \
+    const uint8_t len = (dest_bank_index == 0) ? 1 : ARM_FPU_STATUS_LEN(ctx); \
+    const uint8_t stride = ARM_FPU_STATUS_STRIDE(ctx); \
+    const uint8_t rhs_stride = rhs_bank_index == 0 ? 0 : stride; \
+    arm_fpu_bank dst = {.index = dest_bank_index, .offset = dest_bank_offset}; \
+    arm_fpu_bank lhs = {.index = lhs_bank_index, .offset = lhs_bank_offset}; \
+    arm_fpu_bank rhs = {.index = rhs_bank_index, .offset = rhs_bank_offset}; \
+    for(uint8_t ctr = 0; ctr < len; \
+        dst.offset = (dst.offset + stride) % bank_size, lhs.offset = (lhs.offset + stride) % bank_size, rhs.offset = (rhs.offset + rhs_stride) % bank_size, ++ctr \
+    ) \
+    { \
+        int cumulative_nan = 0; \
+        util_set_##float_type##_in_bank(ctx, dst, \
+            util_##float_type##_##action( \
+                util_get_##float_type##_in_bank(ctx, lhs, &cumulative_nan), \
+                util_get_##float_type##_in_bank(ctx, rhs, &cumulative_nan) \
+            ), &cumulative_nan); \
+    } \
 } while(0)

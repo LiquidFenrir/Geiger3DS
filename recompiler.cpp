@@ -11,6 +11,8 @@ extern "C" {
 #include <span>
 #include <set>
 #include <map>
+#include <utility>
+#include <tuple>
 #include <format>
 #include <algorithm>
 
@@ -36,6 +38,7 @@ struct FILE_deleter {
 };
 using FILE_ptr = std::unique_ptr<FILE, FILE_deleter>;
 
+#define DISASM_LIST_UNIMPL 1
 struct ProcessDisasmContext {
     const u32 start_addr;
     const u32 start_code_addr;
@@ -237,7 +240,15 @@ struct ProcessDisasmContext {
     cs_insn_ptr insn_arm{cs_malloc(handle_arm.handle)};
     cs_insn_ptr insn_thumb{cs_malloc(handle_thumb.handle)};
     std::map<uint64_t, std::string> insn_list{};
-    std::vector<decltype(insn_list)::value_type> insn_temp_list{};
+    using insn_temp_t = std::tuple<std::pair<uint64_t, std::string>
+#if DISASM_LIST_UNIMPL
+        , arm_insn
+#endif
+    >;
+    std::vector<insn_temp_t> insn_temp_list{};
+#if DISASM_LIST_UNIMPL
+    std::set<std::string> insn_unimplemented_list{};
+#endif
 
     struct State {
         csh* handle;
@@ -246,6 +257,35 @@ struct ProcessDisasmContext {
         uint64_t address;
         cs_insn* insn;
     };
+
+    void add_insn(auto&&... parts)
+    {
+        insn_temp_list.emplace_back(std::forward<decltype(parts)>(parts)...);
+    }
+    void commit_insns(const State& state)
+    {
+        for(auto& temp_insn : insn_temp_list)
+        {
+            insn_list.insert(std::move(std::get<0>(temp_insn)));
+#if DISASM_LIST_UNIMPL
+            if(const auto insn_id = std::get<1>(temp_insn); insn_id != arm_insn::ARM_INS_INVALID)
+                insn_unimplemented_list.insert(cs_insn_name(*state.handle, insn_id));
+#endif
+        }
+        insn_temp_list.clear();
+    }
+    void discard_insns(const BranchDestination& entry)
+    {
+        for(auto& temp_insn : insn_temp_list)
+        {
+            auto& mapping = get_mapping(std::get<0>(temp_insn).first);
+            mapping.reset();
+            mapping.failed_guess = true;
+        }
+        auto& mapping = get_mapping(entry.addr);
+        mapping.failed_guess = true;
+        insn_temp_list.clear();
+    }
 };
 
 #define INSN_APPEND_LDREX_TYPE(c_ldr_type) \
@@ -274,18 +314,20 @@ struct ProcessDisasmContext {
         result += "-"; \
     else \
         result += "+"; \
-    result += ", ("; \
+    result += ", (uint32_t)("; \
     if(insn.detail->arm.operands[1].mem.index == arm_reg::ARM_REG_INVALID) \
         result += std::format("{}", insn.detail->arm.operands[1].mem.disp); \
     else { \
-        result += std::format("ctx->{}", cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.index)); \
         if(insn.detail->arm.operands[1].shift.type != ARM_SFT_INVALID) { \
             if(insn.detail->arm.operands[1].shift.type == ARM_SFT_LSL) \
-                result += " << "; \
+                result += std::format("ctx->{} << ", cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.index)); \
             else if(insn.detail->arm.operands[1].shift.type == ARM_SFT_LSR) \
-                result += " >> "; \
+                result += std::format("ctx->{} >> ", cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.index)); \
+            else if(insn.detail->arm.operands[1].shift.type == ARM_SFT_ASR) \
+                result += std::format("(int32_t)(ctx->{}) >> ", cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.index)); \
             result += std::format("{}", insn.detail->arm.operands[1].shift.value); \
-        } \
+        } else \
+                result += std::format("ctx->{}", cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.index)); \
     } \
     result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
 
@@ -449,6 +491,43 @@ struct ProcessDisasmContext {
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
+
+
+struct FPUBankOperand {
+    arm_reg reg;
+    int bank_index; // 0: scalar ; 1, 2, 3: vector ; 4: zero
+    int bank_offset; // [0,4) for doubles, [0,8) for floats
+
+    FPUBankOperand(const arm_reg reg_in = arm_reg::ARM_REG_INVALID, int bank_index_in = 4, int bank_offset_in = 0)
+        : reg{reg_in}
+        , bank_index{bank_index_in}
+        , bank_offset{bank_offset_in}
+    {
+
+    }
+
+private:
+    FPUBankOperand(const arm_reg reg_in, const std::div_t div_res)
+        : FPUBankOperand(reg_in, div_res.quot, div_res.rem)
+    {
+        
+    }
+
+public:
+    FPUBankOperand(const arm_reg reg_in, const bool real_type_is_f64)
+        : FPUBankOperand(reg_in, std::div(
+            real_type_is_f64 ? (reg_in - arm_reg::ARM_REG_D0) : (reg_in - arm_reg::ARM_REG_S0),
+            real_type_is_f64 ? 4 : 8
+        ))
+    {
+        
+    }
+    FPUBankOperand(const arm_reg reg_in)
+        : FPUBankOperand(reg_in, arm_reg::ARM_REG_D0 <= reg_in && reg_in <= arm_reg::ARM_REG_D15)
+    {
+
+    }
+};
 
 static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::BranchDestination& entry)
 {
@@ -667,6 +746,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             last_branch_condcode = ARMCC_AL;
         }
 
+        arm_insn arm_insn_used = arm_insn::ARM_INS_INVALID;
         bool got_okay_can_skip = false;
         if(insn.is_alias) switch(insn.alias_id)
         {
@@ -723,6 +803,8 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
         case ARM_INS_ALIAS_NOP: {
             got_okay_can_skip = true;
+            uncond_branch = true;
+            cond_printf("got NOP, assume alignment/before a constant pool\n");
             break;
         }
         default: {
@@ -940,6 +1022,12 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_set_cpsr(ctx, ctx->{});",
                     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
             }
+            else if(insn.detail->arm.operands[0].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_FPSCR)
+            {
+                // writes to cpsr need to keep some reserved bits, so reads can be simplified
+                result += std::format("arm_cpu_set_fpscr(ctx, ctx->{});",
+                    cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            }
             else
             {
                 result += std::format("ctx->{} = ctx->{};",
@@ -973,6 +1061,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             result += ");";
             break;
         }
+
         case ARM_INS_REV:
         case ARM_INS_REV16:
         case ARM_INS_REVSH:
@@ -981,6 +1070,159 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_insn_name(*state.handle, insn.id),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
+            break;
+        }
+
+        case ARM_INS_VCMP:
+        case ARM_INS_VCMPE: {
+            const bool real_type_f64 = arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[0].reg && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15;
+            const FPUBankOperand lhs_bank((arm_reg)insn.detail->arm.operands[0].reg, real_type_f64);
+
+            result += std::format("util_{}_{}(ctx, ctx->{}_banks[{}][{}], "
+                    , real_type_f64 ? "f64" : "f32"
+                    , cs_insn_name(*state.handle, insn.id)
+                    , real_type_f64 ? "f64" : "f32"
+                    , lhs_bank.bank_index, lhs_bank.bank_offset
+            );
+
+            if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_REG)
+            {
+                const FPUBankOperand rhs_bank((arm_reg)insn.detail->arm.operands[1].reg, real_type_f64);
+                result += std::format("ctx->{}_banks[{}][{}]"
+                    , real_type_f64 ? "f64" : "f32"
+                    , rhs_bank.bank_index, rhs_bank.bank_offset
+                );
+            }
+            else /* if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_IMM && insn.detail->arm.operands[1].imm == 0) */
+            {
+                result += "0";
+            }
+
+            result += ");\n";
+            break;
+        }
+
+        case ARM_INS_VMOV: {
+            /*
+            64 bits:
+            d <- d
+            or 32 bits:
+            s <- s
+            r <- s
+            s <- r
+            **/
+            if(insn.detail->arm.op_count == 2)
+            {
+                if(arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[0].reg && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15
+                && arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[1].reg && insn.detail->arm.operands[1].reg <= arm_reg::ARM_REG_D15)
+                {
+                    result += std::format("*(uint64_t*)&(ctx->{}) = *(uint64_t*)&(ctx->{});\n"
+                        , cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg)
+                        , cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg)
+                    );
+                }
+                else
+                {
+                    result += std::format("*(uint32_t*)&(ctx->{}) = *(uint32_t*)&(ctx->{});\n"
+                        , cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg)
+                        , cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg)
+                    );
+                }
+            }
+            /*
+            s, s (consecutive) <- r, r
+            r, r <- s, s (consecutive)
+            aka
+            d <- r, r == d[31:0], d[63:32] <- r, r
+            r, r <- d == r, r <- d[31:0], d[63:32]
+            */
+            else if(insn.detail->arm.op_count == 3)
+            {
+                const arm_reg lhs_a =  (arm_reg)(arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[0].reg && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15 \
+                    ? (insn.detail->arm.operands[0].reg - arm_reg::ARM_REG_D0) * 2 + arm_reg::ARM_REG_S0
+                    : insn.detail->arm.operands[0].reg
+                );
+                const arm_reg lhs_b =  (arm_reg)(arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[0].reg && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15 \
+                    ? (insn.detail->arm.operands[0].reg - arm_reg::ARM_REG_D0) * 2 + arm_reg::ARM_REG_S0 + 1
+                    : insn.detail->arm.operands[1].reg
+                );
+                const arm_reg rhs_a =  (arm_reg)(arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[2].reg && insn.detail->arm.operands[2].reg <= arm_reg::ARM_REG_D15 \
+                    ? (insn.detail->arm.operands[2].reg - arm_reg::ARM_REG_D0) * 2 + arm_reg::ARM_REG_S0
+                    : insn.detail->arm.operands[1].reg
+                );
+                const arm_reg rhs_b =  (arm_reg)(arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[2].reg && insn.detail->arm.operands[2].reg <= arm_reg::ARM_REG_D15 \
+                    ? (insn.detail->arm.operands[2].reg - arm_reg::ARM_REG_D0) * 2 + arm_reg::ARM_REG_S0 + 1
+                    : insn.detail->arm.operands[2].reg
+                );
+
+                result += std::format("*(uint32_t*)&(ctx->{}) = *(uint32_t*)&(ctx->{});\n"
+                    , cs_reg_name(*state.handle, lhs_a)
+                    , cs_reg_name(*state.handle, rhs_a)
+                );
+                result += std::format("*(uint32_t*)&(ctx->{}) = *(uint32_t*)&(ctx->{});\n"
+                    , cs_reg_name(*state.handle, lhs_b)
+                    , cs_reg_name(*state.handle, rhs_b)
+                );
+            }
+            break;
+        }
+        case ARM_INS_VADD:
+        case ARM_INS_VSUB:
+        case ARM_INS_VDIV: {
+            const bool real_type_f64 = arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[0].reg && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15;
+            const FPUBankOperand dest_bank((arm_reg)insn.detail->arm.operands[0].reg, real_type_f64);
+            const FPUBankOperand op_a_bank = FPUBankOperand((arm_reg)insn.detail->arm.operands[1].reg, real_type_f64);
+            const FPUBankOperand op_b_bank = FPUBankOperand((arm_reg)insn.detail->arm.operands[2].reg, real_type_f64);
+            // ct, type, banksize, dest bank, lhs bank, rhs bank
+            result += std::format("ARM_FPU_PERFORM_ARITH_ALL(ctx, {}, {}, {}, {}, {}, {}, {}, {}, {});\n"
+                , cs_insn_name(*state.handle, insn.id)
+                , real_type_f64 ? "f64" : "f32"
+                , real_type_f64 ? 4 : 8
+                , dest_bank.bank_index, dest_bank.bank_offset
+                , op_a_bank.bank_index, op_a_bank.bank_offset
+                , op_b_bank.bank_index, op_b_bank.bank_offset
+            );
+            break;
+        }
+        case ARM_INS_VMUL:
+        case ARM_INS_VNMUL:
+        case ARM_INS_VMLA:
+        case ARM_INS_VMLS:
+        case ARM_INS_VNMLA:
+        case ARM_INS_VNMLS: {
+            const bool real_type_f64 = arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[0].reg && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15;
+            const FPUBankOperand dest_bank((arm_reg)insn.detail->arm.operands[0].reg, real_type_f64);
+            const FPUBankOperand op_a_bank((arm_reg)insn.detail->arm.operands[1].reg, real_type_f64);
+            const FPUBankOperand op_b_bank((arm_reg)insn.detail->arm.operands[2].reg, real_type_f64);
+
+            result += std::format("ARM_FPU_PERFORM_VMUL_ALL(ctx, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});\n"
+                , real_type_f64 ? "f64" : "f32"
+                , real_type_f64 ? 4 : 8
+                // operation on the summand value
+                , (insn.id == ARM_INS_VMUL || insn.id == ARM_INS_VNMUL) ? "" : ((insn.id == ARM_INS_VNMLA || insn.id == ARM_INS_VNMLS) ? "-" : "+")
+                // operation on the mult result
+                , (insn.id == ARM_INS_VNMUL || insn.id == ARM_INS_VMLS || insn.id == ARM_INS_VNMLA) ? "-" : "+"
+                , dest_bank.bank_index, dest_bank.bank_offset
+                , op_a_bank.bank_index, op_a_bank.bank_offset
+                , op_b_bank.bank_index, op_b_bank.bank_offset
+            );
+            break;
+        }
+        
+        case ARM_INS_VNEG:
+        case ARM_INS_VABS:
+        case ARM_INS_VSQRT: {
+            const bool real_type_f64 = arm_reg::ARM_REG_D0 <= insn.detail->arm.operands[0].reg && insn.detail->arm.operands[0].reg <= arm_reg::ARM_REG_D15;
+            const FPUBankOperand dest_bank((arm_reg)insn.detail->arm.operands[0].reg, real_type_f64);
+            const FPUBankOperand src_bank((arm_reg)insn.detail->arm.operands[1].reg, real_type_f64);
+
+            result += std::format("ARM_FPU_PERFORM_OP1_ALL(ctx, {}, {}, {}, {}, {}, {}, {});\n"
+                , cs_insn_name(*state.handle, insn.id)
+                , real_type_f64 ? "f64" : "f32"
+                , real_type_f64 ? 4 : 8
+                , dest_bank.bank_index, dest_bank.bank_offset
+                , src_bank.bank_index, src_bank.bank_offset
+            );
             break;
         }
 
@@ -1782,6 +2024,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         
         default:
             result += std::format("#warning \"unimplemented: {} {}\"", insn.mnemonic, insn.op_str);
+            arm_insn_used = (arm_insn)insn.id;
             break;
         }
 
@@ -1806,7 +2049,11 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             last_known_reg_from_pc_value.erase((arm_reg)(insn.detail->arm.operands[0].reg));
         }
 
-        ctx.insn_temp_list.emplace_back(active_address, std::move(result));
+        ctx.add_insn(std::make_pair<int64_t, std::string>(active_address, std::move(result))
+#if DISASM_LIST_UNIMPL
+            , arm_insn_used
+#endif
+        );
         if(uncond_branch)
         {
             cond_printf("Unconditional branch detected, stop.\n");
@@ -1818,25 +2065,12 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     {
         // discards chunk
         cond_printf("exit from failure to disas\n");
-        for(auto& temp_insn : ctx.insn_temp_list)
-        {
-            auto& mapping = ctx.get_mapping(temp_insn.first);
-            mapping.reset();
-            mapping.failed_guess = true;
-        }
-        auto& mapping = ctx.get_mapping(entry.addr);
-        mapping.failed_guess = true;
-        ctx.insn_temp_list.clear();
+        ctx.discard_insns(entry);
         ctx.discard_branches();
     }
     else
     {
-        // saves chunk instructions, to be written
-        for(auto& temp_insn : ctx.insn_temp_list)
-        {
-            ctx.insn_list.insert(std::move(temp_insn));
-        }
-        ctx.insn_temp_list.clear();
+        ctx.commit_insns(state);
         ctx.commit_branches();
     }
 }
@@ -2017,6 +2251,13 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         cond_printf("\n");
     }
 
+#if DISASM_LIST_UNIMPL
+    for(const auto& name : ctx.insn_unimplemented_list)
+    {
+        cond_printf("unimplemented: %s\n", name.c_str());
+    }
+#endif
+
     for(u32 i = 0; i < start_code.size() / 4; ++i)
     {
         if(ctx.analyzed[i * 3 + 1].visited)
@@ -2042,18 +2283,17 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     auto labels_arm_file = labels_arm_file_ptr.get();
     auto labels_thumb_file = labels_thumb_file_ptr.get();
 
-    safe_fprintf(source_file, "#include \"./include/arm_cpu_ctx.h\"\n\n");
     safe_fprintf(source_file, "void ATTR_FASTCALL ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
     safe_fprintf(source_file, "goto LABEL_ARM_start;\n");
     safe_fprintf(source_file, "LABEL_ARM_error:\n");
     safe_fprintf(source_file, "LABEL_THUMB_error:\n");
     safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx);\n");
 
-    safe_fprintf(source_file, "static const int LABELS_ARM_TABLE[] = {\n");
+    safe_fprintf(source_file, "static const int LABELS_ARM_TABLE[] __attribute__((section(\".rdata\")))  = {\n");
     safe_fprintf(source_file, "#include \"%s.lab.arm.c\"\n", filename.c_str());
     safe_fprintf(source_file, "};\n");
 
-    safe_fprintf(source_file, "static const int LABELS_THUMB_TABLE[] = {\n");
+    safe_fprintf(source_file, "static const int LABELS_THUMB_TABLE[] __attribute__((section(\".rdata\"))) = {\n");
     safe_fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
     safe_fprintf(source_file, "};\n");
 
@@ -2167,5 +2407,5 @@ int main(int argc, char** argv)
     auto seg_rodata = load_data(argv[2]);
     auto seg_data = load_data(argv[3]);
 
-    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, true);
+    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, false);
 }
