@@ -2247,7 +2247,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     if(unvisited_ongoing)
     {
         unvisited_ongoing = false;
-        cond_printf("unvisited: %08x - %08x (length %08x)", unvisited_start, (u32)start_code.size(), (u32)(start_code.size() - unvisited_start));
+        cond_printf("unvisited: %08x - %08x (length %08x)", unvisited_start, ctx.end_code_addr, (u32)(ctx.end_code_addr - unvisited_start));
         cond_printf("\n");
     }
 
