@@ -1,7 +1,10 @@
 extern "C" {
-#include "capstone/platform.h"
-#include "capstone/capstone.h"
+#include <capstone/platform.h>
+#include <capstone/capstone.h>
 }
+
+#include <embed_ctx.h>
+
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -227,7 +230,7 @@ struct ProcessDisasmContext {
         Handle_csh(auto&&... args)
         {
             cs_open(args..., &handle);
-            cs_option(handle, CS_OPT_NO_BRANCH_OFFSET, CS_OPT_ON);
+            cs_option(handle, CS_OPT_ONLY_OFFSET_BRANCH, CS_OPT_ON);
             cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
         }
         ~Handle_csh()
@@ -564,6 +567,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     {
         const auto& insn = *state.insn;
         bool uncond_branch = false;
+        // contains thumb bit0
         const u32 active_address = insn.address + (in_thumb_mode ? 1 : 0);
         auto& mapping = ctx.get_mapping(active_address);
         const auto arm_mapping = ctx.get_mapping(active_address & ~3u);
@@ -620,7 +624,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             break;
         }
         
-        if(cs_insn_group(*state.handle, &insn, arm_insn_group::ARM_FEATURE_IsThumb2))
+        if(cs_insn_group(*state.handle, &insn, arm_insn_group::ARM_FEATURE_ISTHUMB2))
         {
             // we don't have thumb2 in v6k
             cond_printf("thumb2 -> invalid\n");
@@ -734,7 +738,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
 
         std::string result;
-        result += std::format("arm_cpu_update_pc(ctx, 0x{:08x}, {});\n", insn.address, in_thumb_mode ? 4 : 8);
+        result += std::format("arm_cpu_update_pc(ctx, 0x{:08x}, {});\n", insn.address, in_thumb_mode ? "ARM_CPU_PC_AHEAD_THUMB" : "ARM_CPU_PC_AHEAD_ARM");
         if(insn.detail->arm.cc != ARMCC_AL && insn.detail->arm.cc != ARMCC_UNDEF)
         {
             result += std::format("if(arm_cpu_check_cc(ctx, arm_cpu_cc_{}))", ARMCondCodeToString(insn.detail->arm.cc));
@@ -803,8 +807,8 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
         case ARM_INS_ALIAS_NOP: {
             got_okay_can_skip = true;
-            uncond_branch = true;
-            cond_printf("got NOP, assume alignment/before a constant pool\n");
+            // uncond_branch = true;
+            // cond_printf("got NOP, assume alignment/before a constant pool\n");
             break;
         }
         default: {
@@ -1226,6 +1230,63 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             break;
         }
 
+        // always scalar
+        case ARM_INS_VCVT: {
+            std::string dst_reg = dst_reg = cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg);
+            std::string src_reg = dst_reg = cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg);
+            std::string_view dst_type, src_type;
+
+#define UTIL_ARM_INS_VCVT_IMPL(c_arm_vectordata_type, c_dst_type, c_src_type) \
+            case arm_vectordata_type::c_arm_vectordata_type: \
+                dst_type = c_dst_type; \
+                src_type = c_src_type; \
+                break
+
+            switch(insn.detail->arm.vector_data)
+            {
+        // from f32
+            // to f64
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F64F32, "f64", "f32");
+            // to s32
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_S32F32, "s32", "f32");
+            // to u32
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_U32F32, "u32", "f32");
+
+        // from f64
+            // to f32
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F32F64, "f32", "f64");
+            // to s32
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_S32F64, "s32", "f64");
+            // to u32
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_U32F64, "u32", "f64");
+
+        // from s32
+            // to f32
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F32S32, "f32", "s32");
+            // to f64
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F64S32, "f64", "s32");
+
+        // from u32
+            // to f32
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F32U32, "f32", "u32");
+            // to f64
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F64U32, "f64", "u32");
+
+            default:
+                cond_printf("vcvt arm_vectordata_type: %d\n", (int)insn.detail->arm.vector_data);
+                result += std::format("#warning \"unimplemented: {} {}\"", insn.mnemonic, insn.op_str);
+                arm_insn_used = (arm_insn)insn.id;
+                break;
+            }
+
+            if(!dst_type.empty())
+            {
+                result += std::format("*({}_t*)&(ctx->{}) = *({}_t*)&(ctx->{});", dst_type, dst_reg, src_type, src_reg);
+            }
+
+            break;
+        }
+
         case ARM_INS_ADD:
         case ARM_INS_ADC:
         case ARM_INS_SUB:
@@ -1306,7 +1367,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     for(int64_t index = 0; index < last_ldr_offset_for_switch_max_offset; ++index)
                     {
                         const int64_t offset = switch_offsets[index];
-                        const u32 value = active_address + (in_thumb_mode ? 4 : 8) + offset * 4;
+                        const u32 value = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + offset * 4;
                         cond_printf("Entry %lld (pc off %08llx): 0x%08x\n", index, offset, value);
                         ctx.add_branch({(u32)(value), false, false, false});
                     }
@@ -1316,7 +1377,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             {
                 if(auto it = last_known_reg_from_pc_value.find((arm_reg)(insn.detail->arm.operands[0].reg)); it != last_known_reg_from_pc_value.end())
                 {
-                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + it->second;
+                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + it->second;
                     if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
                     {
                         cond_printf("found 2-step function pointer: 0x%08x (from offset at 0x%08x)\n", pointer, it->second);
@@ -1330,7 +1391,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             {
                 if(insn.id == ARM_INS_ADD)
                 {
-                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
+                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
                     if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
                     {
                         cond_printf("found ADR (add)! 0x%08x\n", pointer);
@@ -1346,7 +1407,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 }
                 else if(insn.id == ARM_INS_SUB)
                 {
-                    const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) - insn.detail->arm.operands[2].imm;
+                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) - insn.detail->arm.operands[2].imm;
                     if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
                     {
                         cond_printf("found ADR (sub)! 0x%08x\n", pointer);
@@ -1447,7 +1508,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             
             if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC)
             {
-                const u32 pointer = active_address + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
+                const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
                 cond_printf("found emulated bl! 0x%08x\n", pointer);
                 ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
                 last_is_uncond_bl = true;
@@ -2106,7 +2167,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
 
     for(std::size_t i = 0; i < rodata.size(); i += sizeof(u32))
     {
-        const u32 analyzed_addr = start_addr + ALIGN_PAGE_NUM(start_code.size()) + i;
+        const u32 analyzed_addr = ctx.start_rodata_addr + i;
         u32 value = 0;
         std::memcpy(&value, &rodata[i], 4);
         if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
@@ -2121,7 +2182,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
 
     for(std::size_t i = 0; i < data.size(); i += sizeof(u32))
     {
-        const u32 analyzed_addr = start_addr + ALIGN_PAGE_NUM(start_code.size()) + ALIGN_PAGE_NUM(rodata.size()) + i;
+        const u32 analyzed_addr = ctx.start_data_addr + i;
         u32 value = 0;
         std::memcpy(&value, &data[i], sizeof(u32));
         if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
@@ -2139,7 +2200,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         if(ctx.analyzed[i * 3].visited || ctx.analyzed[i * 3].tried)
             continue;
 
-        const u32 analyzed_addr = start_addr + i * 4;
+        const u32 analyzed_addr = ctx.start_code_addr + i * 4;
         u32 value = 0;
         std::memcpy(&value, &start_code[i * 4], sizeof(u32));
         if(value == 0)
@@ -2284,11 +2345,21 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     auto labels_thumb_file = labels_thumb_file_ptr.get();
 
     safe_fprintf(source_file, "void ATTR_FASTCALL ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
-    safe_fprintf(source_file, "goto LABEL_ARM_start;\n");
+
+    safe_fprintf(source_file, "{\n");
+    safe_fprintf(source_file, "arm_code_bank* bank = NULL;\n");
+    safe_fprintf(source_file, "for(bank = ctx->code_banks; bank && !(bank->start_addr <= ctx->pc && ctx->pc < bank->end_addr); bank = bank->next_bank);\n");
+    safe_fprintf(source_file, "#include \"%s.lab.arm.c\"\n", filename.c_str());
+    safe_fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
+    safe_fprintf(source_file, "}\n");
+    safe_fprintf(source_file, "arm_cpu_instr_entry_setup_done(ctx);\n"); // will go back to the action if CRO, otherwise continue to start the program
+    safe_fprintf(source_file, "ARM_CPU_PERFORM_BX(ctx, ctx->pc);\n");
+
     safe_fprintf(source_file, "LABEL_ARM_error:\n");
     safe_fprintf(source_file, "LABEL_THUMB_error:\n");
     safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx);\n");
 
+    /*
     safe_fprintf(source_file, "static const int LABELS_ARM_TABLE[] __attribute__((section(\".rdata\")))  = {\n");
     safe_fprintf(source_file, "#include \"%s.lab.arm.c\"\n", filename.c_str());
     safe_fprintf(source_file, "};\n");
@@ -2296,6 +2367,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     safe_fprintf(source_file, "static const int LABELS_THUMB_TABLE[] __attribute__((section(\".rdata\"))) = {\n");
     safe_fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
     safe_fprintf(source_file, "};\n");
+    */
 
     safe_fprintf(source_file, "LABEL_ARM_start:\n");
     safe_fprintf(source_file, "LABEL_THUMB_start:\n");
@@ -2313,10 +2385,12 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             {
                 cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
-            safe_fprintf(labels_arm_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
+            // safe_fprintf(labels_arm_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
         }
 
-        safe_fprintf(labels_arm_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
+        // safe_fprintf(labels_arm_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
+        // safe_fprintf(labels_arm_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entry_arm = &&LABEL_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, label_kind, insn_address);
+        safe_fprintf(labels_arm_file, "ARM_SETUP_LABEL(0x%08llx, 0x%08llx, entry_arm, %s);\n", insn_address, (uint64_t)start_addr, label_kind);
         safe_fprintf(source_file, "LABEL_%s_0x%08llx:\n", label_kind, insn_address);
         safe_fwrite(insn_text.data(), 1, insn_text.size(), source_file);
         safe_fprintf(source_file, "\n");
@@ -2337,39 +2411,16 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             {
                 cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
-            safe_fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
+            // safe_fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
         }
 
-        safe_fprintf(labels_thumb_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, active_address, label_kind);
+        // safe_fprintf(labels_thumb_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, active_address, label_kind);
+        // safe_fprintf(labels_thumb_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entries_thumb[(0x%08llx & 2) >> 1] = &&LABEL_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, insn_address, label_kind, insn_address);
+        safe_fprintf(labels_thumb_file, "ARM_SETUP_LABEL(0x%08llx, 0x%08llx, entries_thumb[%lld], %s);\n", insn_address, (uint64_t)start_addr, ((insn_address & 2) >> 1), label_kind);
+
         safe_fprintf(source_file, "LABEL_%s_0x%08llx:\n", label_kind, active_address);
         fwrite(insn_text.data(), 1, insn_text.size(), source_file);
         safe_fprintf(source_file, "\n");
-    }
-
-    for(u32 i = 0; i < start_code.size() / 4; ++i)
-    {
-        for(int j = 0; j < 2; ++j)
-        {
-            const u32 insn_address = i * 4 + start_addr + 1 + j * 2;
-            if(ctx.analyzed[i * 3 + j + 1].visited)
-            {
-                safe_fprintf(labels_thumb_file, "&&LABEL_%s_0x%08x - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
-                safe_fprintf(source_file, "LABEL_%s_0x%08x:\n", label_kind, insn_address);
-                if(auto it = ctx.insn_list.find(insn_address); it != ctx.insn_list.end())
-                {
-                    fwrite(it->second.data(), 1, it->second.size(), source_file);
-                    safe_fprintf(source_file, "\n");
-                }
-                else
-                {
-                    safe_fprintf(source_file, "// invalid addr, no matching insn\n");
-                }
-            }
-            else
-            {
-                safe_fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
-            }
-        }
     }
 
     safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx); /* should never get there */\n");

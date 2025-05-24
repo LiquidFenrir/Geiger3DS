@@ -1,6 +1,9 @@
+extern "C" {
 #include <windows.h>
 #include <winhvplatform.h>
 #include <winhvemulation.h>
+}
+
 #include <exception>
 #include <stdexcept>
 
@@ -20,7 +23,7 @@
 #include <list>
 #include <span>
 
-#include "arm_cpu_ctx.h"
+#include <arm_cpu_ctx.h>
 
 #define THROW_IF_FAILED(x) do { if(auto __my_r = (x); FAILED(__my_r)) { \
     auto __my_r_s = GetLastErrorAsString(); \
@@ -272,7 +275,7 @@ struct MyVirtualProcessorThingy {
     }
     HRESULT TranslateGva(WHV_GUEST_VIRTUAL_ADDRESS Gva, WHV_TRANSLATE_GVA_FLAGS TranslateFlags, WHV_TRANSLATE_GVA_RESULT* res, WHV_GUEST_PHYSICAL_ADDRESS* Gpa)
     {
-        WHvTranslateGva(m_Partition, m_VpIndex, Gva, TranslateFlags, res, Gpa);
+        return WHvTranslateGva(m_Partition, m_VpIndex, Gva, TranslateFlags, res, Gpa);
     }
 
 private:
@@ -540,7 +543,7 @@ struct MyKernelThingy {
         bool started;
         std::jthread core_thread;
         std::mutex core_mutex;
-        std::barrier<void()> start_barrier;
+        std::barrier<void (*)()> start_barrier;
         /*
          * PML4 is unchanging
          * PDP 0 PD 0 will contain the core's active process' base mappings
@@ -562,7 +565,7 @@ struct MyKernelThingy {
     };
 
     MyKernelThingy();
-    MyKernelThingy::MyKernelThingy(std::span<const unsigned char> code);
+    MyKernelThingy(std::span<const unsigned char> code);
     ~MyKernelThingy()
     {
         for(auto& core : m_virtual_cores)
@@ -578,7 +581,7 @@ struct MyKernelThingy {
     /// @return Process ID
     [[nodiscard]] int load_process(std::string code_path)
     {
-
+        return -1;
     }
 
     void start_process_on_core(int pid, int core_id)
@@ -732,7 +735,7 @@ MyKernelThingy::VirtualCore::VirtualCore(MyKernelThingy& kernel, int core_id)
     , vcpu{kernel.m_partition.get(), core_id}
     , vcpu_id{core_id}
     , started{false}
-    , start_barrier{2, []() -> void {}}
+    , start_barrier{2, []() noexcept -> void {}}
     , base_pml4_page{nullptr}
     , pagetable_start_paddr{0}
     , vcpu_arm_context{nullptr}

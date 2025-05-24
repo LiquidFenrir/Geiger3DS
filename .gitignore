@@ -1,5 +1,6 @@
 *.exe
-capstone-build/
+build/
+build-*/
 *.bin
 *.elf
 *.txt
@@ -10,5 +11,8 @@ capstone-build/
 *.src.c
 *.lab.arm.c
 *.lab.thumb.c
+.vscode/
 capstone/
 3ds-examples/
+
+!CMakeLists.txt
