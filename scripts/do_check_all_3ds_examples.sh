@@ -1,6 +1,10 @@
 #!/bin/bash
 
+if [ "$#" -ne 1 ]; then
+    echo "Illegal number of parameters"
+fi
+
 # in project folder, clone/copy https://github.com/devkitPro/3ds-examples/
 
 ./scripts/do_check_all_3ds_examples_prepare.sh
-./scripts/do_check_all_3ds_examples_check.sh
+./scripts/do_check_all_3ds_examples_check.sh "$1"

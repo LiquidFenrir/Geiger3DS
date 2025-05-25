@@ -17,20 +17,20 @@ typedef int64_t s64_t;
 
 #define ATTR_FORCE_INLINE __attribute__((__always_inline__))
 #define ATTR_NORETURN __attribute__((__noreturn__))
-#define ATTR_FASTCALL __attribute__((__fastcall__))
+#define ATTR_CALLCONV __attribute__((__sysv_abi__))
 #define ATTR_NO_SAVE_REGS __attribute__((__no_callee_saved_registers__))
 
-#define ATTR_FUNC_BASE ATTR_FORCE_INLINE ATTR_FASTCALL
+#define ATTR_FUNC_BASE ATTR_FORCE_INLINE ATTR_CALLCONV
 
-#define ARM_SYNC_EXCLUSIVE_MASK (0xfffffff8)
-#define ARM_SYNC_INVALID_EXCLUSIVE_ADDRESS (0xffffffff)
-#define ARM_CPU_PC_ADVANCE_THUMB (2)
-#define ARM_CPU_PC_AHEAD_THUMB ((ARM_CPU_PC_ADVANCE_THUMB) * 2)
-#define ARM_CPU_PC_ADVANCE_ARM (4)
-#define ARM_CPU_PC_AHEAD_ARM ((ARM_CPU_PC_ADVANCE_ARM) * 2)
+#define SYNC_EXCLUSIVE_MASK (0xfffffff8)
+#define SYNC_INVALID_EXCLUSIVE_ADDRESS (0xffffffff)
+#define CPU_PC_ADVANCE_THUMB (2)
+#define CPU_PC_AHEAD_THUMB ((CPU_PC_ADVANCE_THUMB) * 2)
+#define CPU_PC_ADVANCE_ARM (4)
+#define CPU_PC_AHEAD_ARM ((CPU_PC_ADVANCE_ARM) * 2)
 
-#define ARM_DEFINE_LABEL(kind, addr) LAB_ ## kind ## _ ## addr:
-#define ARM_SETUP_LABEL(addr, base_addr, entry_name, label_kind) bank->labels[(addr - base_addr) / 4].entry_name = &&LABEL_##label_kind##_##addr
+#define DEFINE_LABEL(kind, addr) LAB_##kind##_##addr:
+// #define SETUP_LABEL(addr, base_addr, entry_name, label_kind) bank->labels[(addr - base_addr) / 4].entry_name = &&LAB_##label_kind##_##addr
 
 typedef enum arm_cpu_cc {
   arm_cpu_cc_eq = 0, // Equal
@@ -84,14 +84,14 @@ typedef enum arm_cpu_cc {
 #define CPU_STATUS_T(ctx) BITS_named(ctx, T)
 #define CPU_STATUS_GE(ctx) BITS_named(ctx, GE)
 
-#define ARM_FPU_BITS_LEN(ctx) (BITS_value_width_shift_out((ctx)->fpscr, 3u, 16) + 1)
-#define ARM_FPU_BITS_STRIDE(ctx) ((BITS_value_mask_shift_out((ctx)->fpscr, 0x3u, 20) == 0x3u) ? 2 : 1)
-#define ARM_FPU_BITS_ROUNDING_MODE(ctx) BITS_value_width_shift_out((ctx)->fpscr, 2u, 22)
+#define FPU_BITS_LEN(ctx) (BITS_value_width_shift_out((ctx)->fpscr, 3u, 16) + 1)
+#define FPU_BITS_STRIDE(ctx) ((BITS_value_mask_shift_out((ctx)->fpscr, 0x3u, 20) == 0x3u) ? 2 : 1)
+#define FPU_BITS_ROUNDING_MODE(ctx) BITS_value_width_shift_out((ctx)->fpscr, 2u, 22)
 // return default NaN if any instruction takes/generates any NaN
 // f32: 0x7fc00000
 // f64: 0x7fc0000000000000
-#define ARM_FPU_BITS_DEFAULT_NAN(ctx) BITS_bitindex((ctx)->fpscr, 25)
-#define ARM_FPU_BITS_FLUSH_DENORM_ZERO(ctx) BITS_bitindex((ctx)->fpscr, 24)
+#define FPU_BITS_DEFAULT_NAN(ctx) BITS_bitindex((ctx)->fpscr, 25)
+#define FPU_BITS_FLUSH_DENORM_ZERO(ctx) BITS_bitindex((ctx)->fpscr, 24)
 
 #define BITS_set_width(cpsr, new_flag, bitindex, width) \
     ((cpsr) = (((cpsr) & ~BITS_value_shift_in(width, bitindex)) | BITS_value_shift_in(new_flag, bitindex)))
@@ -106,6 +106,7 @@ typedef enum arm_cpu_cc {
 #define CPU_STATUS_GE_SET(ctx, new_value) (((ctx)->cpsr & ~BITS_value_shift_in(0xfu, 16)) | BITS_value_shift_in(new_value, 16))
 // #define CPU_STATUS_T_SET(ctx, value) ((ctx)->cpsr = ((((ctx)->cpsr) & ~(1u << 5)) | ((u32_t)(value != 0) << 5)))
 
+#define CPU_CTX_DEFINE(name, ...) __VA_ARGS__ arm_cpu_ctx* const name __attribute__((unused))
 typedef struct arm_fpu_bank {
     u8_t index;
     u8_t offset;
@@ -240,8 +241,8 @@ typedef struct arm_cpu_ctx {
     u32_t fpscr;
     u32_t fpexc;
     u32_t fpsid; // 0x410120b4
-    arm_code_bank* code_banks;
-#if ARM_RUNTIME_PC_OFFSET
+    const void* indirect_brancher; // noreturn void indirect_brancher(arm_cpu_ctx*, u32_t);
+#if RUNTIME_PC_OFFSET
     u32_t pc_offset;
 #endif
     u32_t thread_id;
@@ -276,60 +277,62 @@ static inline void ATTR_FUNC_BASE util_set_mxcsr(const u32_t* const from)
 #else
 static inline void ATTR_FUNC_BASE util_get_mxcsr(u32_t* const into)
 {
-    __asm__ __volatile__ ("stmxcsr %0"
+    __asm__ __volatile__ ("stmxcsr %rdi"
         : "=m"(*into)
-        : /* No inputs */
-        : "memory");
+        : "rD"(into)
+        : /* No clobbers */
+    );
 }
 static inline void ATTR_FUNC_BASE util_set_mxcsr(const u32_t* const from)
 {
     __asm__ __volatile__ ("ldmxcsr %0"
         : /* No outputs */
-        : "m"(*from)
-        : "cc");
+        : "rD"(from), "m"(*from)
+        : "cc"
+    );
 }
 #endif
 
-static inline int ATTR_FUNC_BASE arm_cpu_check_cc(const arm_cpu_ctx* const ctx, const arm_cpu_cc cc)
+static inline int ATTR_FUNC_BASE arm_cpu_check_cc(CPU_CTX_DEFINE(ctx, const), const arm_cpu_cc cc)
 {
     // disable the "negative" ones which are always the opposite of the one before
     // thus need to invert the check when the "negative" one is the actual value
-#define ARM_CPU_PERFORM_cc(check) (((int)(cc) & 1) != (check))
+#define CPU_PERFORM_cc(check) (((int)(cc) & 1) != (check))
     switch((int)cc & ~1)
     {
     case arm_cpu_cc_eq: // Equal
-        return ARM_CPU_PERFORM_cc(CPU_STATUS_Z(ctx) == 1);
+        return CPU_PERFORM_cc(CPU_STATUS_Z(ctx) == 1);
     case arm_cpu_cc_hs: // Carry set
-        return ARM_CPU_PERFORM_cc(CPU_STATUS_C(ctx) == 1);
+        return CPU_PERFORM_cc(CPU_STATUS_C(ctx) == 1);
     case arm_cpu_cc_mi: // Minus, negative
-        return ARM_CPU_PERFORM_cc(CPU_STATUS_N(ctx) == 1);
+        return CPU_PERFORM_cc(CPU_STATUS_N(ctx) == 1);
     case arm_cpu_cc_vs: // Overflow
-        return ARM_CPU_PERFORM_cc(CPU_STATUS_V(ctx) == 1);
+        return CPU_PERFORM_cc(CPU_STATUS_V(ctx) == 1);
     case arm_cpu_cc_hi: // Unsigned higher
-        return ARM_CPU_PERFORM_cc((CPU_STATUS_C(ctx) == 1) && (CPU_STATUS_Z(ctx) == 0));
+        return CPU_PERFORM_cc((CPU_STATUS_C(ctx) == 1) && (CPU_STATUS_Z(ctx) == 0));
     case arm_cpu_cc_ge: // Greater than or equal
-        return ARM_CPU_PERFORM_cc(CPU_STATUS_N(ctx) == CPU_STATUS_V(ctx));
+        return CPU_PERFORM_cc(CPU_STATUS_N(ctx) == CPU_STATUS_V(ctx));
     case arm_cpu_cc_gt: // Greater than
-        return ARM_CPU_PERFORM_cc((CPU_STATUS_Z(ctx) == 0) && (CPU_STATUS_N(ctx) == CPU_STATUS_V(ctx)));
+        return CPU_PERFORM_cc((CPU_STATUS_Z(ctx) == 0) && (CPU_STATUS_N(ctx) == CPU_STATUS_V(ctx)));
     case arm_cpu_cc_al: // Always (unconditional)
-        return ARM_CPU_PERFORM_cc(1);
+        return CPU_PERFORM_cc(1);
     default: // Undefined or invalid value
         return 0;
     }
-#undef ARM_CPU_PERFORM_cc
+#undef CPU_PERFORM_cc
 }
 
-static inline void ATTR_FUNC_BASE arm_cpu_set_cpsr(arm_cpu_ctx* const ctx, const u32_t value)
+static inline void ATTR_FUNC_BASE arm_cpu_set_cpsr(CPU_CTX_DEFINE(ctx), const u32_t value)
 {
     // clear the bits that are "read-as-X" and then set the ones that need to be "read-as-1"
     ctx->cpsr = (value & 0xf90f03ff) | 0x00000000;
 }
-static inline void ATTR_FUNC_BASE arm_cpu_set_fpscr(arm_cpu_ctx* const ctx, const u32_t value)
+static inline void ATTR_FUNC_BASE arm_cpu_set_fpscr(CPU_CTX_DEFINE(ctx), const u32_t value)
 {
     ctx->fpscr = value;
     util_get_mxcsr(&ctx->mxcsr_value);
     ctx->mxcsr_value &= ~0xe000u;
-    switch(ARM_FPU_BITS_ROUNDING_MODE(ctx))
+    switch(FPU_BITS_ROUNDING_MODE(ctx))
     {
     case 0: // to nearest
         ctx->mxcsr_value |= 0x0000;
@@ -346,11 +349,11 @@ static inline void ATTR_FUNC_BASE arm_cpu_set_fpscr(arm_cpu_ctx* const ctx, cons
     default:
         break;
     }
-    if(ARM_FPU_BITS_FLUSH_DENORM_ZERO(ctx))
+    if(FPU_BITS_FLUSH_DENORM_ZERO(ctx))
         ctx->mxcsr_value |= 0x8000;
     util_set_mxcsr(&ctx->mxcsr_value);
 }
-static inline void ATTR_FUNC_BASE arm_cpu_set_apsr(arm_cpu_ctx* const ctx, const char* flags_to_write, const u32_t value)
+static inline void ATTR_FUNC_BASE arm_cpu_set_apsr(CPU_CTX_DEFINE(ctx), const char* flags_to_write, const u32_t value)
 {
     while(flags_to_write && *flags_to_write) switch(*flags_to_write++)
     {
@@ -376,7 +379,7 @@ static inline void ATTR_FUNC_BASE arm_cpu_set_apsr(arm_cpu_ctx* const ctx, const
         break;
     }
 }
-static inline u32_t ATTR_FUNC_BASE arm_cpu_get_apsr(const arm_cpu_ctx* const ctx, const char* flags_to_write)
+static inline u32_t ATTR_FUNC_BASE arm_cpu_get_apsr(CPU_CTX_DEFINE(ctx, const), const char* flags_to_write)
 {
     u32_t out = 0;
     while(flags_to_write && *flags_to_write) switch(*flags_to_write++)
@@ -406,10 +409,10 @@ static inline u32_t ATTR_FUNC_BASE arm_cpu_get_apsr(const arm_cpu_ctx* const ctx
 }
 
 // ONLY PASS 0 OR 1 IN NEW_FLAG
-static inline void ATTR_FUNC_BASE CPU_STATUS_T_SET(arm_cpu_ctx* const ctx, const u32_t new_flag)
+static inline void ATTR_FUNC_BASE CPU_STATUS_T_SET(CPU_CTX_DEFINE(ctx), const u32_t new_flag)
 {
     ctx->cpsr = ((ctx->cpsr) & ~(1u << 5)) | (new_flag << 5);
-#if ARM_RUNTIME_PC_OFFSET
+#if RUNTIME_PC_OFFSET
     if(new_flag) // thumb
         ctx->pc_offset = 4;
     else // arm
@@ -417,8 +420,8 @@ static inline void ATTR_FUNC_BASE CPU_STATUS_T_SET(arm_cpu_ctx* const ctx, const
 #endif
 }
 
-static inline void ATTR_FUNC_BASE arm_cpu_update_pc(volatile arm_cpu_ctx* const ctx, const u32_t new_pc
-#if !ARM_RUNTIME_PC_OFFSET
+static inline void ATTR_FUNC_BASE arm_cpu_update_pc(CPU_CTX_DEFINE(ctx, volatile), const u32_t new_pc
+#if !RUNTIME_PC_OFFSET
 , const u32_t pc_offset
 #endif
 )
@@ -429,7 +432,7 @@ static inline void ATTR_FUNC_BASE arm_cpu_update_pc(volatile arm_cpu_ctx* const 
     // ctx->pc = new_pc + (((CPU_STATUS_T_GET(ctx) ^ (1u << 5)) + (1u << 5)) >> 3);
     // even better ? at least way less instructions than either
     ctx->pc = new_pc +
-#if ARM_RUNTIME_PC_OFFSET
+#if RUNTIME_PC_OFFSET
     ctx->
 #endif
     pc_offset;
@@ -468,7 +471,7 @@ static inline int ATTR_FUNC_BASE util_f64_isDenormal(const double* const value)
 
 #define _mm_sqrt_sd(v) _mm_sqrt_sd(_mm_undefined_pd(), (v))
 #define MAKE_UTILS_FOR_FLOAT_TYPE(float_type, float_suffix_std,  float_vector_type, float_suffix_intr) \
-static inline void ATTR_FUNC_BASE util_##float_type##_vcmp(arm_cpu_ctx* const ctx, const float_type##_t lhs, const float_type##_t rhs) \
+static inline void ATTR_FUNC_BASE util_##float_type##_vcmp(CPU_CTX_DEFINE(ctx), const float_type##_t lhs, const float_type##_t rhs) \
 { \
     const float_vector_type lhs_vec = _mm_load_s##float_suffix_intr(&lhs); \
     const float_vector_type rhs_vec = _mm_load_s##float_suffix_intr(&rhs); \
@@ -481,7 +484,7 @@ static inline void ATTR_FUNC_BASE util_##float_type##_vcmp(arm_cpu_ctx* const ct
     BITS_set((ctx)->fpscr, res_geu, 29); \
     BITS_set((ctx)->fpscr, res_u, 28); \
 } \
-static inline void ATTR_FUNC_BASE util_##float_type##_vcmpe(arm_cpu_ctx* const ctx, const float_type##_t lhs, const float_type##_t rhs) \
+static inline void ATTR_FUNC_BASE util_##float_type##_vcmpe(CPU_CTX_DEFINE(ctx), const float_type##_t lhs, const float_type##_t rhs) \
 { \
     /* should raise exception (invalid operation) on NaN, don't care so just stub as a normal vcmp */ \
     util_##float_type##_vcmp(ctx, lhs, rhs); \
@@ -510,22 +513,22 @@ static inline float_type##_t ATTR_FUNC_BASE util_##float_type##_vdiv(const float
 { \
     return lhs / rhs; \
 } \
-static inline float_type##_t ATTR_FUNC_BASE util_get_##float_type##_in_bank(const arm_cpu_ctx* const ctx, const arm_fpu_bank bank, int* const cumulative_nan) \
+static inline float_type##_t ATTR_FUNC_BASE util_get_##float_type##_in_bank(CPU_CTX_DEFINE(ctx, const), const arm_fpu_bank bank, int* const cumulative_nan) \
 { \
     float_type##_t out = ctx->float_type##_banks[bank.index][bank.offset]; \
-    if(ARM_FPU_BITS_DEFAULT_NAN(ctx) && util_##float_type##_isNaN(&out)) \
+    if(FPU_BITS_DEFAULT_NAN(ctx) && util_##float_type##_isNaN(&out)) \
     { \
         *cumulative_nan = 1; \
     } \
-    else if(ARM_FPU_BITS_FLUSH_DENORM_ZERO(ctx) && util_##float_type##_isDenormal(&out)) \
+    else if(FPU_BITS_FLUSH_DENORM_ZERO(ctx) && util_##float_type##_isDenormal(&out)) \
     { \
         out = 0; \
     } \
     return out; \
 } \
-static inline void ATTR_FUNC_BASE util_set_##float_type##_in_bank(arm_cpu_ctx* const ctx, const arm_fpu_bank bank, const float_type##_t value, const int* const cumulative_nan) \
+static inline void ATTR_FUNC_BASE util_set_##float_type##_in_bank(CPU_CTX_DEFINE(ctx), const arm_fpu_bank bank, const float_type##_t value, const int* const cumulative_nan) \
 { \
-    if(ARM_FPU_BITS_DEFAULT_NAN(ctx) && ((cumulative_nan != NULL && *cumulative_nan == 1) || util_##float_type##_isNaN(&value)) && cumulative_nan != NULL) \
+    if(FPU_BITS_DEFAULT_NAN(ctx) && ((cumulative_nan != NULL && *cumulative_nan == 1) || util_##float_type##_isNaN(&value)) && cumulative_nan != NULL) \
     { \
         util_get_##float_type##_defaultNaN(&ctx->float_type##_banks[bank.index][bank.offset]); \
     } \
@@ -538,32 +541,42 @@ static inline void ATTR_FUNC_BASE util_set_##float_type##_in_bank(arm_cpu_ctx* c
 MAKE_UTILS_FOR_FLOAT_TYPE(f32, f, __m128, s)
 MAKE_UTILS_FOR_FLOAT_TYPE(f64, , __m128d, d)
 
-static inline void ATTR_FUNC_BASE arm_cpu_instr_svc(arm_cpu_ctx* const ctx, const s64_t svc_id)
+static inline void ATTR_FUNC_BASE arm_cpu_instr_svc_raw(CPU_CTX_DEFINE(ctx), const u64_t signal_id)
 {
-    __asm__ __volatile__ ("int3"
-        : /* No outputs */
-        : "d"(svc_id)
+    __asm__ __volatile__ (
+        "int3"
+        : "+m"(*ctx)
+        : "D"(signal_id)
         : "memory");
 }
-static inline void ATTR_NORETURN ATTR_FUNC_BASE arm_cpu_instr_branch_to_addr(arm_cpu_ctx* const ctx, const s64_t svc_id)
+static inline void ATTR_FUNC_BASE arm_cpu_instr_svc(CPU_CTX_DEFINE(ctx), const u32_t svc_id)
 {
-    __asm__ __volatile__ ("int3"
-        : /* No outputs */
-        : "d"(svc_id)
-        : "memory");
+    return arm_cpu_instr_svc_raw(ctx, svc_id);
 }
-static inline void ATTR_NORETURN ATTR_FUNC_BASE arm_cpu_instr_runtime_error(arm_cpu_ctx* const ctx)
+static inline void ATTR_NORETURN ATTR_FUNC_BASE arm_cpu_instr_branch_to_addr(CPU_CTX_DEFINE(ctx), const u32_t addr)
 {
-    arm_cpu_instr_svc(ctx, -1);
+    asm goto (
+        "jmp %rdi"
+        : /* No outputs. */
+        : "rD" (ctx->indirect_brancher), "rS"(addr)
+        : /* No clobbers. */
+        : /* No (local) labels */ after_jump
+    );
+after_jump:
     __builtin_unreachable();
 }
-static inline void ATTR_FUNC_BASE arm_cpu_instr_entry_setup_done(arm_cpu_ctx* const ctx)
+static inline void ATTR_NORETURN ATTR_FUNC_BASE arm_cpu_instr_runtime_error(CPU_CTX_DEFINE(ctx))
 {
-    arm_cpu_instr_svc(ctx, -2);
+    arm_cpu_instr_svc_raw(ctx, -1);
+    __builtin_unreachable();
 }
-static inline void ATTR_FUNC_BASE arm_cpu_instr_udf(arm_cpu_ctx* const ctx, const s32_t udf_id)
+static inline void ATTR_FUNC_BASE arm_cpu_instr_entry_setup_done(CPU_CTX_DEFINE(ctx))
 {
-    arm_cpu_instr_svc(ctx, -(16ll + udf_id));
+    arm_cpu_instr_svc_raw(ctx, -2);
+}
+static inline void ATTR_FUNC_BASE arm_cpu_instr_udf(CPU_CTX_DEFINE(ctx), const s32_t udf_id)
+{
+    arm_cpu_instr_svc_raw(ctx, (u64_t)udf_id + (1ull << 32));
 }
 
 static inline u32_t ATTR_FUNC_BASE util_rotl32(const u32_t n, u32_t c)
@@ -579,7 +592,7 @@ static inline u32_t ATTR_FUNC_BASE util_rotr32(const u32_t n, u32_t c)
     return (n >> c) | (n << ((-c) & mask));
 }
 
-static inline u32_t ATTR_FUNC_BASE arm_cpu_update_carry_flag_constant_operand2(arm_cpu_ctx* const ctx, const int set_flags, const u32_t imm)
+static inline u32_t ATTR_FUNC_BASE arm_cpu_update_carry_flag_constant_operand2(CPU_CTX_DEFINE(ctx), const int set_flags, const u32_t imm)
 {
     if(!set_flags) return imm;
     if(imm <= 255) return imm;
@@ -594,41 +607,41 @@ static inline u32_t ATTR_FUNC_BASE arm_cpu_update_carry_flag_constant_operand2(a
     }
     return imm;
 }
-static inline void ATTR_FUNC_BASE arm_cpu_update_flags_NZ_32(arm_cpu_ctx* const ctx, const u32_t value)
+static inline void ATTR_FUNC_BASE arm_cpu_update_flags_NZ_32(CPU_CTX_DEFINE(ctx), const u32_t value)
 {
     CPU_STATUS_N_SET(ctx, ((value & (1u << 31)) != 0));
     CPU_STATUS_Z_SET(ctx, (value == 0));
 }
-static inline void ATTR_FUNC_BASE arm_cpu_update_flags_NZ_64(arm_cpu_ctx* const ctx, const u64_t value)
+static inline void ATTR_FUNC_BASE arm_cpu_update_flags_NZ_64(CPU_CTX_DEFINE(ctx), const u64_t value)
 {
     CPU_STATUS_N_SET(ctx, ((value & (1ull << 63)) != 0));
     CPU_STATUS_Z_SET(ctx, (value == 0));
 }
 
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ASR(arm_cpu_ctx* const ctx, const u32_t value, const u32_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_ASR(CPU_CTX_DEFINE(ctx), const u32_t value, const u32_t shift)
 {
     return (u32_t)((s32_t)value >> shift);
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_LSL(arm_cpu_ctx* const ctx, const u32_t value, const u32_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_LSL(CPU_CTX_DEFINE(ctx), const u32_t value, const u32_t shift)
 {
     return value << shift;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_LSR(arm_cpu_ctx* const ctx, const u32_t value, const u32_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_LSR(CPU_CTX_DEFINE(ctx), const u32_t value, const u32_t shift)
 {
     return value >> shift;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ROR(arm_cpu_ctx* const ctx, const u32_t value, const u32_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_ROR(CPU_CTX_DEFINE(ctx), const u32_t value, const u32_t shift)
 {
     return util_rotr32(value, shift);
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_RRX(arm_cpu_ctx* const ctx, const u32_t value, const int update_flags)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_RRX(CPU_CTX_DEFINE(ctx), const u32_t value, const int update_flags)
 {
     const u32_t current_carry = CPU_STATUS_C_GET(ctx);
     if(update_flags) CPU_STATUS_C_SET(ctx, (value & 1));
     return (value >> 1) | (current_carry << 31);
 }
 
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_asr_REG(arm_cpu_ctx* const ctx, const u32_t value, const int update_flags, u8_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_asr_REG(CPU_CTX_DEFINE(ctx), const u32_t value, const int update_flags, u8_t shift)
 {
     if(shift == 0) return value;
     if(shift >= 32)
@@ -650,7 +663,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_asr_REG(arm_cpu_ctx* const ct
         return output;
     }
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_lsl_REG(arm_cpu_ctx* const ctx, const u32_t value, const int update_flags, const u8_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_lsl_REG(CPU_CTX_DEFINE(ctx), const u32_t value, const int update_flags, const u8_t shift)
 {
     if(shift == 0) return value;
     if(shift >= 32)
@@ -678,7 +691,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_lsl_REG(arm_cpu_ctx* const ct
         return output;
     }
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_lsr_REG(arm_cpu_ctx* const ctx, const u32_t value, const int update_flags, const u8_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_lsr_REG(CPU_CTX_DEFINE(ctx), const u32_t value, const int update_flags, const u8_t shift)
 {
     if(shift == 0) return value;
     if(shift >= 32)
@@ -706,7 +719,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_lsr_REG(arm_cpu_ctx* const ct
         return output;
     }
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ctx, const u32_t value, const int update_flags, const u8_t shift)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_ror_REG(CPU_CTX_DEFINE(ctx), const u32_t value, const int update_flags, const u8_t shift)
 {
     if(shift == 0) return value;
     if(shift % 32 == 0)
@@ -728,73 +741,61 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ct
     }
 }
 
-#define ARM_CPU_PERFORM_ARM_B(ctx, target) do { \
-    goto LABEL_ARM_##target; \
+#define CPU_PERFORM_ARM_B(ctx, target) do { \
+    goto LAB_ARM_##target; \
 } while(0)
 
-#define ARM_CPU_PERFORM_THUMB_B(ctx, target) do { \
-    goto LABEL_THUMB_##target; \
+#define CPU_PERFORM_THUMB_B(ctx, target) do { \
+    goto LAB_THUMB_##target; \
 } while(0)
 
-#define ARM_CPU_PERFORM_BRANCH_REG(ctx, value_in) do { \
+#define CPU_PERFORM_BRANCH_REG(ctx, value_in) do { \
     const u32_t value = (value_in); \
-    const void* lab = NULL; \
-    for(const arm_code_bank* bank = ctx->code_banks; bank; bank = bank->next_bank) \
-    { \
-        if(!(bank->start_addr <= value && value < bank->end_addr)) continue; \
-        const arm_code_bank_entry* entry = &bank->labels[(value - bank->start_addr) / 4]; \
-        if(CPU_STATUS_T(ctx)) \
-            lab = entry->entries_thumb[(value & 2) >> 1 /* (value & 2) == 2 ? 1 : 0 */ ]; \
-        else \
-            lab = entry->entry_arm; \
-        break; \
-    } \
-    if(lab) goto* lab; \
-    goto LABEL_ARM_error; \
+    arm_cpu_instr_branch_to_addr(ctx, value); \
 } while(0)
 
-#define ARM_CPU_PERFORM_BX(ctx, reg) do { \
+#define CPU_PERFORM_BX(ctx, reg) do { \
     if((reg) & 1) CPU_STATUS_T_SET(ctx, 1); \
     else CPU_STATUS_T_SET(ctx, 0); \
-    ARM_CPU_PERFORM_BRANCH_REG(ctx, reg); \
+    CPU_PERFORM_BRANCH_REG(ctx, reg); \
 } while(0)
 
-#define ARM_CPU_PERFORM_ARM_BL(ctx, target) do { \
-    ctx->lr = ctx->pc - (ARM_CPU_PC_ADVANCE_ARM); \
-    goto LABEL_ARM_##target; \
+#define CPU_PERFORM_ARM_BL(ctx, target) do { \
+    ctx->lr = ctx->pc - (CPU_PC_ADVANCE_ARM); \
+    goto LAB_ARM_##target; \
 } while(0)
-#define ARM_CPU_PERFORM_ARM_BLX_IMM(ctx, target) do { \
-    ctx->lr = ctx->pc - (ARM_CPU_PC_ADVANCE_ARM); \
+#define CPU_PERFORM_ARM_BLX_IMM(ctx, target) do { \
+    ctx->lr = ctx->pc - (CPU_PC_ADVANCE_ARM); \
     CPU_STATUS_T_SET(ctx, 1); \
-    goto LABEL_THUMB_##target; \
+    goto LAB_THUMB_##target; \
 } while(0)
-#define ARM_CPU_PERFORM_THUMB_BL(ctx, target) do { \
-    ctx->lr = (ctx->pc - (ARM_CPU_PC_ADVANCE_THUMB)) | 1; \
-    goto LABEL_THUMB_##target; \
+#define CPU_PERFORM_THUMB_BL(ctx, target) do { \
+    ctx->lr = (ctx->pc - (CPU_PC_ADVANCE_THUMB)) | 1; \
+    goto LAB_THUMB_##target; \
 } while(0)
-#define ARM_CPU_PERFORM_THUMB_BLX_IMM(ctx, target) do { \
-    ctx->lr = (ctx->pc - (ARM_CPU_PC_ADVANCE_THUMB)) | 1; \
+#define CPU_PERFORM_THUMB_BLX_IMM(ctx, target) do { \
+    ctx->lr = (ctx->pc - (CPU_PC_ADVANCE_THUMB)) | 1; \
     CPU_STATUS_T_SET(ctx, 0); \
-    goto LABEL_ARM_##target; \
+    goto LAB_ARM_##target; \
 } while(0)
 
-#define ARM_CPU_PERFORM_BLX_REG(ctx, reg) do { \
-    if(CPU_STATUS_T(ctx)) ctx->lr = (ctx->pc - (ARM_CPU_PC_ADVANCE_THUMB)) | 1; \
-    else ctx->lr = ctx->pc - (ARM_CPU_PC_ADVANCE_ARM); \
-    ARM_CPU_PERFORM_BX(ctx, reg); \
+#define CPU_PERFORM_BLX_REG(ctx, reg) do { \
+    if(CPU_STATUS_T(ctx)) ctx->lr = (ctx->pc - (CPU_PC_ADVANCE_THUMB)) | 1; \
+    else ctx->lr = ctx->pc - (CPU_PC_ADVANCE_ARM); \
+    CPU_PERFORM_BX(ctx, reg); \
 } while(0)
 
-#define ARM_CPU_PERFORM_LDR_ALL(ctx, destination, type_access, type_cast, base, operator, index, writeback, post_index) do { \
+#define CPU_PERFORM_LDR_ALL(ctx, destination, type_access, type_cast, base, operator, index, writeback, post_index) do { \
     u32_t addr = base; \
     const u32_t addr_off = index; \
     if(!post_index) addr += addr_off; \
     destination = type_cast *(type_access*)(void*)(uintptr_t)(addr); \
     if(post_index) addr += addr_off; \
     if(writeback) base = addr; \
-    if((const unsigned char*)&(destination) == (const unsigned char*)&(ctx->pc)) ARM_CPU_PERFORM_BX(ctx, ctx->pc); \
+    if((const unsigned char*)&(destination) == (const unsigned char*)&(ctx->pc)) CPU_PERFORM_BX(ctx, ctx->pc); \
 } while(0)
 
-#define ARM_CPU_PERFORM_LDRD(ctx, destinationA, destinationB, base, operator, index, writeback, post_index) do { \
+#define CPU_PERFORM_LDRD(ctx, destinationA, destinationB, base, operator, index, writeback, post_index) do { \
     u32_t addr = base; \
     const u32_t addr_off = index; \
     if(!post_index) addr += addr_off; \
@@ -804,7 +805,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ct
     if(writeback) base = addr; \
 } while(0)
 
-#define ARM_CPU_PERFORM_STR_ALL(ctx, source, type_access, bitmask_and, base, operator, index, writeback, post_index) do { \
+#define CPU_PERFORM_STR_ALL(ctx, source, type_access, bitmask_and, base, operator, index, writeback, post_index) do { \
     u32_t addr = base; \
     const u32_t addr_off = index; \
     if(!post_index) addr += addr_off; \
@@ -813,7 +814,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ct
     if(writeback) base = addr; \
 } while(0)
 
-#define ARM_CPU_PERFORM_STRD(ctx, sourceA, sourceB, base, operator, index, writeback, post_index) do { \
+#define CPU_PERFORM_STRD(ctx, sourceA, sourceB, base, operator, index, writeback, post_index) do { \
     u32_t addr = base; \
     const u32_t addr_off = index; \
     if(!post_index) addr += addr_off; \
@@ -832,12 +833,12 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ct
 
 #define ARGEXTRACT_MULTIPLE_LDM_LOOP_BODY(c_ldm_type, c_reg_index, c_reg_name, ...) ctx->c_reg_name = *(c_ldm_type*)(void*)(uintptr_t)(addr_start + c_reg_index * step_off);
 
-#define ARM_CPU_PERFORM_LDM_ALL(ctx, base, writeback, init_off, step, final_off, arguments, write_pc) do { \
+#define CPU_PERFORM_LDM_ALL(ctx, base, writeback, init_off, step, final_off, arguments, write_pc) do { \
     const u32_t addr_start = base + (init_off); \
     const u32_t step_off = (step); \
     ARGEXTRACT_DO(ARGEXTRACT_MULTIPLE_LDM arguments); \
     if(writeback) base = base + (final_off); /* not allowed to have base in the reglist, but not checked */ \
-    if(write_pc) ARM_CPU_PERFORM_BX(ctx, ctx->pc); \
+    if(write_pc) CPU_PERFORM_BX(ctx, ctx->pc); \
 } while(0)
 
 #define ARGEXTRACT_MULTIPLE_STM(...) ARGEXTRACT_MULTIPLE_STM_LOOP_BODY(__VA_ARGS__,) ARGEXTRACT_MULTIPLE_STM_LOOP_B
@@ -849,14 +850,14 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ct
 
 #define ARGEXTRACT_MULTIPLE_STM_LOOP_BODY(c_stm_type, c_reg_index, c_reg_name, ...) *(c_stm_type*)(void*)(uintptr_t)(addr_start + c_reg_index * step_off) = ctx->c_reg_name;
 
-#define ARM_CPU_PERFORM_STM_ALL(ctx, base, writeback, init_off, step, final_off, arguments) do { \
+#define CPU_PERFORM_STM_ALL(ctx, base, writeback, init_off, step, final_off, arguments) do { \
     const u32_t addr_start = base + (init_off); \
     const u32_t step_off = (step); \
     ARGEXTRACT_DO(ARGEXTRACT_MULTIPLE_STM arguments); \
     if(writeback) base = base + (final_off); /* not allowed to have base in the reglist, but not checked */ \
 } while(0)
 
-#define ARM_CPU_PERFORM_FLAGS_cmp(ctx, argA, argB) do { \
+#define CPU_PERFORM_FLAGS_cmp(ctx, argA, argB) do { \
     const u32_t result = (argA) - (argB); \
     const s64_t result_big = (s64_t)(argA) - (s64_t)(argB); \
     CPU_STATUS_N_SET(ctx, ((result & (1u << 31)) != 0)); \
@@ -865,7 +866,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ct
     CPU_STATUS_V_SET(ctx, ((result_big < -(1ll << 31)) || (1ll << 31) >= result_big)); \
 } while(0)
 
-#define ARM_CPU_PERFORM_FLAGS_cmn(ctx, argA, argB) do { \
+#define CPU_PERFORM_FLAGS_cmn(ctx, argA, argB) do { \
     const u32_t result = (argA) + (argB); \
     const s64_t result_big = (s64_t)(argA) + (s64_t)(argB); \
     CPU_STATUS_N_SET(ctx, ((result & (1u << 31)) != 0)); \
@@ -874,19 +875,19 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_ror_REG(arm_cpu_ctx* const ct
     CPU_STATUS_V_SET(ctx, ((result_big < -(1ll << 31)) || (1ll << 31) >= result_big)); \
 } while(0)
 
-#define ARM_CPU_PERFORM_FLAGS_tst(ctx, argA, argB) do {  \
+#define CPU_PERFORM_FLAGS_tst(ctx, argA, argB) do {  \
     const u32_t result = (argA) & (argB); \
     CPU_STATUS_N_SET(ctx, ((result & (1u << 31)) != 0)); \
     CPU_STATUS_Z_SET(ctx, (result == 0)); \
 } while(0)
 
-#define ARM_CPU_PERFORM_FLAGS_teq(ctx, argA, argB) do {  \
+#define CPU_PERFORM_FLAGS_teq(ctx, argA, argB) do {  \
     const u32_t result = (argA) ^ (argB); \
     CPU_STATUS_N_SET(ctx, ((result & (1u << 31)) != 0)); \
     CPU_STATUS_Z_SET(ctx, (result == 0)); \
 } while(0)
 
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_add(arm_cpu_ctx* const ctx, const int set_flags, const u32_t argA, const u32_t argB)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_add(CPU_CTX_DEFINE(ctx), const int set_flags, const u32_t argA, const u32_t argB)
 {
     const u32_t result = (argA) + (argB);
     if(set_flags)
@@ -899,7 +900,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_add(arm_cpu_ctx* const ctx, c
     }
     return result;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_sub(arm_cpu_ctx* const ctx, const int set_flags, const u32_t argA, const u32_t argB)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_sub(CPU_CTX_DEFINE(ctx), const int set_flags, const u32_t argA, const u32_t argB)
 {
     const u32_t result = (argA) - (argB);
     if(set_flags)
@@ -912,7 +913,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_sub(arm_cpu_ctx* const ctx, c
     }
     return result;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rsb(arm_cpu_ctx* const ctx, const int set_flags, const u32_t argA, const u32_t argB)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_rsb(CPU_CTX_DEFINE(ctx), const int set_flags, const u32_t argA, const u32_t argB)
 {
     const u32_t result = (argB) - (argA);
     if(set_flags)
@@ -926,7 +927,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rsb(arm_cpu_ctx* const ctx, c
     return result;
 }
 
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_adc(arm_cpu_ctx* const ctx, const int set_flags, const u32_t argA, const u32_t argB)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_adc(CPU_CTX_DEFINE(ctx), const int set_flags, const u32_t argA, const u32_t argB)
 {
     const u32_t result = (argA) + (argB) + (CPU_STATUS_C(ctx) ? 1 : 0);
     if(set_flags)
@@ -939,7 +940,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_adc(arm_cpu_ctx* const ctx, c
     }
     return result;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_sbc(arm_cpu_ctx* const ctx, const int set_flags, const u32_t argA, const u32_t argB)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_sbc(CPU_CTX_DEFINE(ctx), const int set_flags, const u32_t argA, const u32_t argB)
 {
     const u32_t result = (argA) - (argB) + (CPU_STATUS_C(ctx) ? 0 : -1);
     if(set_flags)
@@ -952,7 +953,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_sbc(arm_cpu_ctx* const ctx, c
     }
     return result;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rsc(arm_cpu_ctx* const ctx, const int set_flags, const u32_t argA, const u32_t argB)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_rsc(CPU_CTX_DEFINE(ctx), const int set_flags, const u32_t argA, const u32_t argB)
 {
     const u32_t result = (argB) - (argA) + (CPU_STATUS_C(ctx) ? 0 : -1);
     if(set_flags)
@@ -966,7 +967,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rsc(arm_cpu_ctx* const ctx, c
     return result;
 }
 
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rev(arm_cpu_ctx* const ctx, const u32_t value)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_rev(CPU_CTX_DEFINE(ctx), const u32_t value)
 {
     u32_t output = 0;
     output |= ((value >> 0) & 0xff) << 24;
@@ -975,7 +976,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rev(arm_cpu_ctx* const ctx, c
     output |= ((value >> 24) & 0xff) << 0;
     return output;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rev16(arm_cpu_ctx* const ctx, const u32_t value)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_rev16(CPU_CTX_DEFINE(ctx), const u32_t value)
 {
     u32_t output = 0;
     output |= ((value >> 0) & 0xff) << 8;
@@ -984,14 +985,14 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_rev16(arm_cpu_ctx* const ctx,
     output |= ((value >> 24) & 0xff) << 16;
     return output;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_revsh(arm_cpu_ctx* const ctx, const u32_t value)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_revsh(CPU_CTX_DEFINE(ctx), const u32_t value)
 {
     u16_t output = 0;
     output |= ((value >> 0) & 0xff) << 8;
     output |= ((value >> 8) & 0xff) << 0;
     return (s32_t)(s16_t)output;
 }
-static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, const u32_t value)
+static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_clz(CPU_CTX_DEFINE(ctx), const u32_t value)
 {
     u32_t output = 0;
     for(int i = 31; i >= 0; --i, ++output)
@@ -1002,10 +1003,10 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     return output;
 }
 
-#define ARM_CPU_PERFORM_LDREX_ALL(ctx, destination, type_access, base) do { \
+#define CPU_PERFORM_LDREX_ALL(ctx, destination, type_access, base) do { \
     const u32_t addr = base; \
     const u32_t cpu_id = ctx->cpu_id; \
-    const u32_t masked_addr = addr & ARM_SYNC_EXCLUSIVE_MASK; \
+    const u32_t masked_addr = addr & SYNC_EXCLUSIVE_MASK; \
     const u32_t value = *(type_access*)(void*)(uintptr_t)(addr); \
     while(!__sync_bool_compare_and_swap(ctx->sync_data_lock, 0, cpu_id + 1)); ctx->sync_addresses[cpu_id] = masked_addr; \
     ctx->sync_data[cpu_id] = value; \
@@ -1013,10 +1014,10 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     destination = value; \
 } while(0)
 
-#define ARM_CPU_PERFORM_LDREXD(ctx, destinationA, destinationB, base) do { \
+#define CPU_PERFORM_LDREXD(ctx, destinationA, destinationB, base) do { \
     const u32_t addr = base; \
     const u32_t cpu_id = ctx->cpu_id; \
-    const u32_t masked_addr = addr & ARM_SYNC_EXCLUSIVE_MASK; \
+    const u32_t masked_addr = addr & SYNC_EXCLUSIVE_MASK; \
     const u32_t valueA = *(u32_t*)(void*)(uintptr_t)(addr); \
     const u32_t valueB = *(u32_t*)(void*)(uintptr_t)(addr + 4); \
     while(!__sync_bool_compare_and_swap(ctx->sync_data_lock, 0, cpu_id + 1)); \
@@ -1027,11 +1028,11 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     destinationB = valueB; \
 } while(0)
 
-#define ARM_CPU_PERFORM_STREX_ALL(ctx, destination, source, type_access, bitmask_and, base) do { \
+#define CPU_PERFORM_STREX_ALL(ctx, destination, source, type_access, bitmask_and, base) do { \
     const u32_t addr = base; \
     const u32_t cpu_id = ctx->cpu_id; \
     const u32_t num_cpus = ctx->num_cpus; \
-    const u32_t masked_addr = addr & ARM_SYNC_EXCLUSIVE_MASK; \
+    const u32_t masked_addr = addr & SYNC_EXCLUSIVE_MASK; \
     const type_access value = source & bitmask_and; \
     while(!__sync_bool_compare_and_swap(ctx->sync_data_lock, 0, cpu_id + 1)); ctx->sync_addresses[cpu_id] = masked_addr; \
     if(ctx->sync_addresses[cpu_id] != masked_addr) { \
@@ -1039,7 +1040,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
         destination = 1; /* 1 indicates failure */ \
     } else { \
         for(int other_addr_idx = 0; other_addr_idx < num_cpus; ++other_addr_idx) \
-            if(ctx->sync_addresses[other_addr_idx] == masked_addr) ctx->sync_addresses[other_addr_idx] = ARM_SYNC_INVALID_EXCLUSIVE_ADDRESS; \
+            if(ctx->sync_addresses[other_addr_idx] == masked_addr) ctx->sync_addresses[other_addr_idx] = SYNC_INVALID_EXCLUSIVE_ADDRESS; \
         const type_access old_value = ctx->sync_data[cpu_id] & bitmask_and; \
         const type_access actual = __sync_val_compare_and_swap((type_access*)(void*)(uintptr_t)(addr), old_value, value); \
         destination = old_value != actual; /* 1 indicates failure, 0 success */ \
@@ -1047,11 +1048,11 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     } \
 } while(0)
 
-#define ARM_CPU_PERFORM_STREXD(ctx, destination, sourceA, sourceB, base) do { \
+#define CPU_PERFORM_STREXD(ctx, destination, sourceA, sourceB, base) do { \
     const u32_t addr = base; \
     const u32_t cpu_id = ctx->cpu_id; \
     const u32_t num_cpus = ctx->num_cpus; \
-    const u32_t masked_addr = addr & ARM_SYNC_EXCLUSIVE_MASK; \
+    const u32_t masked_addr = addr & SYNC_EXCLUSIVE_MASK; \
     const u64_t value = (((u64_t)sourceB) << 32) | ((u64_t)sourceA); \
     while(!__sync_bool_compare_and_swap(ctx->sync_data_lock, 0, cpu_id + 1)); ctx->sync_addresses[cpu_id] = masked_addr; \
     if(ctx->sync_addresses[cpu_id] != masked_addr) { \
@@ -1059,7 +1060,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
         destination = 1; /* 1 indicates failure */ \
     } else { \
         for(int other_addr_idx = 0; other_addr_idx < num_cpus; ++other_addr_idx) \
-            if(ctx->sync_addresses[other_addr_idx] == masked_addr) ctx->sync_addresses[other_addr_idx] = ARM_SYNC_INVALID_EXCLUSIVE_ADDRESS; \
+            if(ctx->sync_addresses[other_addr_idx] == masked_addr) ctx->sync_addresses[other_addr_idx] = SYNC_INVALID_EXCLUSIVE_ADDRESS; \
         const u64_t old_value = ctx->sync_data[cpu_id]; \
         const u64_t actual = __sync_val_compare_and_swap((u64_t*)(void*)(uintptr_t)(addr), old_value, value); \
         destination = old_value != actual; /* 1 indicates failure, 0 success */ \
@@ -1067,29 +1068,29 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     } \
 } while(0)
 
-#define ARM_CPU_PERFORM_CLREX(ctx) do { \
+#define CPU_PERFORM_CLREX(ctx) do { \
     const u32_t cpu_id = ctx->cpu_id; \
     while(!__sync_bool_compare_and_swap(ctx->sync_data_lock, 0, cpu_id + 1)); \
-    ctx->sync_addresses[cpu_id] = ARM_SYNC_INVALID_EXCLUSIVE_ADDRESS; \
+    ctx->sync_addresses[cpu_id] = SYNC_INVALID_EXCLUSIVE_ADDRESS; \
     while(!__sync_bool_compare_and_swap(ctx->sync_data_lock, cpu_id + 1, 0)); \
 } while(0)
 
-#define ARM_CPU_PERFORM_XT(ctx, destination, source, rot, mask_and, basic_type, extend_type) do { \
+#define CPU_PERFORM_XT(ctx, destination, source, rot, mask_and, basic_type, extend_type) do { \
     destination = (u32_t)(extend_type)(basic_type)(util_rotr32(source, rot) & mask_and); \
 } while(0)
 
-#define ARM_CPU_PERFORM_XTB16(ctx, destination, source, ROTFLAGS_REGISTRATIONKEEPSALIVE, basic_type, extend_type) do { \
+#define CPU_PERFORM_XTB16(ctx, destination, source, ROTFLAGS_REGISTRATIONKEEPSALIVE, basic_type, extend_type) do { \
     const u32_t rotated = util_rotr32(source, rot); \
     const u16_t valueA = (u16_t)(extend_type)(basic_type)(rotated & 0xff); \
     const u16_t valueB = (u16_t)(extend_type)(basic_type)((rotated >> 24) & 0xff); \
     destination = ((u32_t)valueB << 16) | (u32_t)valueA; \
 } while(0)
 
-#define ARM_CPU_PERFORM_XTA(ctx, destination, source, rot, mask_and, basic_type, extend_type, addend) do { \
+#define CPU_PERFORM_XTA(ctx, destination, source, rot, mask_and, basic_type, extend_type, addend) do { \
     destination = addend + (u32_t)(extend_type)(basic_type)(util_rotr32(source, rot) & mask_and); \
 } while(0)
 
-#define ARM_CPU_PERFORM_XTAB16(ctx, destination, source, rot, basic_type, extend_type, addend) do { \
+#define CPU_PERFORM_XTAB16(ctx, destination, source, rot, basic_type, extend_type, addend) do { \
     const u32_t rotated = util_rotr32(source, rot); \
     const u32_t addend_value = util_rotr32(source, rot); \
     const u16_t valueA = ((u16_t)(addend_value & 0xffff) + (u16_t)(extend_type)(basic_type)(rotated & 0xff)) & 0xffff; \
@@ -1097,22 +1098,22 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     destination = ((u32_t)valueB << 16) | (u32_t)valueA; \
 } while(0)
 
-#define ARM_CPU_PERFORM_MLA(ctx, set_flags, destination, argA, argB, addend) do { \
+#define CPU_PERFORM_MLA(ctx, set_flags, destination, argA, argB, addend) do { \
     const u32_t result = ((argA) * (argB)) + addend; \
     if(set_flags) arm_cpu_update_flags_NZ_32(ctx, result); \
     destination = result; \
 } while(0)
 
-#define ARM_CPU_PERFORM_MUL(ctx, set_flags, destination, argA, argB) ARM_CPU_PERFORM_MLA(ctx, set_flags, destination, argA, argB, 0)
+#define CPU_PERFORM_MUL(ctx, set_flags, destination, argA, argB) CPU_PERFORM_MLA(ctx, set_flags, destination, argA, argB, 0)
 
-#define ARM_CPU_PERFORM_xMULL(ctx, base_type, set_flags, destLo, destHi, argA, argB) do { \
+#define CPU_PERFORM_xMULL(ctx, base_type, set_flags, destLo, destHi, argA, argB) do { \
     const u64_t result = (u64_t)((base_type)argA * (base_type)argB); \
     if(set_flags) arm_cpu_update_flags_NZ_64(ctx, result); \
     destLo = (u32_t)(result & 0xffffffff); \
     destHi = (u32_t)((result >> 32) & 0xffffffff); \
 } while(0)
 
-#define ARM_CPU_PERFORM_xMLAL(ctx, base_type, set_flags, destLo, destHi, argA, argB) do { \
+#define CPU_PERFORM_xMLAL(ctx, base_type, set_flags, destLo, destHi, argA, argB) do { \
     const u64_t mul_result = (u64_t)((base_type)argA * (base_type)argB); \
     const u64_t existing = ((u64_t)destHi << 32) | (u64_t)destLo; \
     const u64_t result = existing + mul_result; \
@@ -1121,7 +1122,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     destHi = (u32_t)((result >> 32) & 0xffffffff); \
 } while(0)
 
-#define ARM_CPU_PERFORM_SEL(ctx, destination, argA, argB) do { \
+#define CPU_PERFORM_SEL(ctx, destination, argA, argB) do { \
     u32_t mask = 0; \
     const u32_t ge_flag = CPU_STATUS_GE_GET(ctx); \
     const u32_t argA_value = argA; \
@@ -1134,7 +1135,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     destination = result; \
 } while(0)
 
-#define ARM_CPU_PERFORM_SIMD_8_TYPE(ctx, base_type, operation, destination, argA, argB) do { \
+#define CPU_PERFORM_SIMD_8_TYPE(ctx, base_type, operation, destination, argA, argB) do { \
     const u32_t argA_value = argA; \
     const u32_t argB_value = argB; \
     const u32_t argA_parts[4] = { \
@@ -1184,7 +1185,7 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     destination = result; \
 } while(0)
 
-#define ARM_CPU_PERFORM_SIMD_16_TYPE_ALL(ctx, base_type, shiftLo, shiftHi, opLo, opHi, destination, argA, argB) do { \
+#define CPU_PERFORM_SIMD_16_TYPE_ALL(ctx, base_type, shiftLo, shiftHi, opLo, opHi, destination, argA, argB) do { \
     const u32_t argA_value = argA; \
     const u32_t argB_value = argB; \
     const u32_t argA_parts[2] = { \
@@ -1215,14 +1216,14 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     destination = result; \
 } while(0)
 
-#define ARM_CPU_PERFORM_SIMD_16_TYPE(ctx, base_type, operation, destination, argA, argB) \
-    ARM_CPU_PERFORM_SIMD_16_TYPE_ALL(ctx, base_type, 0, 16, operation, operation, destination, argA, argB)
+#define CPU_PERFORM_SIMD_16_TYPE(ctx, base_type, operation, destination, argA, argB) \
+    CPU_PERFORM_SIMD_16_TYPE_ALL(ctx, base_type, 0, 16, operation, operation, destination, argA, argB)
 
-#define ARM_CPU_PERFORM_SIMD_16_DUAL_TYPE(ctx, base_type, opHi, opLo, destination, argA, argB) \
-    ARM_CPU_PERFORM_SIMD_16_TYPE_ALL(ctx, base_type, 16, 0, opLo, opHi, destination, argA, argB)
+#define CPU_PERFORM_SIMD_16_DUAL_TYPE(ctx, base_type, opHi, opLo, destination, argA, argB) \
+    CPU_PERFORM_SIMD_16_TYPE_ALL(ctx, base_type, 16, 0, opLo, opHi, destination, argA, argB)
 
-#define ARM_CPU_PERFORM_MCR(ctx, source, coproc_id, opcodeA, opcodeB, coproc_regA, coproc_regB) do { \
-    if(coproc_id != 15) goto LABEL_ARM_error; \
+#define CPU_PERFORM_MCR(ctx, source, coproc_id, opcodeA, opcodeB, coproc_regA, coproc_regB) do { \
+    if(coproc_id != 15) goto LAB_ARM_error; \
     if(opcodeA == 0 && opcodeB == 2 && coproc_regA == 13 && coproc_regB == 0) \
         ctx->cp15.thread_uprw = source; \
     else if(opcodeA == 0 && opcodeB == 4 && coproc_regA == 7 && coproc_regB == 5) \
@@ -1231,21 +1232,21 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
         /* data sync barrier */; \
     else if(opcodeA == 0 && opcodeB == 5 && coproc_regA == 7 && coproc_regB == 10) \
         /* data memory barrier */; \
-    else goto LABEL_ARM_error; \
+    else goto LAB_ARM_error; \
 } while(0)
 
-#define ARM_CPU_PERFORM_MRC(ctx, source, coproc_id, opcodeA, opcodeB, coproc_regA, coproc_regB) do { \
-    if(coproc_id != 15) goto LABEL_ARM_error; \
+#define CPU_PERFORM_MRC(ctx, source, coproc_id, opcodeA, opcodeB, coproc_regA, coproc_regB) do { \
+    if(coproc_id != 15) goto LAB_ARM_error; \
     if(opcodeA == 0 && opcodeB == 2 && coproc_regA == 13 && coproc_regB == 0) \
         source = ctx->cp15.thread_uprw; \
     if(opcodeA == 0 && opcodeB == 3 && coproc_regA == 13 && coproc_regB == 0) \
         source = ctx->cp15.thread_upro; \
-    else goto LABEL_ARM_error; \
+    else goto LAB_ARM_error; \
 } while(0)
 
-#define ARM_FPU_PERFORM_VMUL_ALL(ctx, float_type, bank_size, sum_preop, mul_postop, dest_bank_index, dest_bank_offset, lhs_bank_index, lhs_bank_offset, rhs_bank_index, rhs_bank_offset) do { \
-    const u8_t len = (dest_bank_index == 0) ? 1 : ARM_FPU_BITS_LEN(ctx); \
-    const u8_t stride = ARM_FPU_BITS_STRIDE(ctx); \
+#define FPU_PERFORM_VMUL_ALL(ctx, float_type, bank_size, sum_preop, mul_postop, dest_bank_index, dest_bank_offset, lhs_bank_index, lhs_bank_offset, rhs_bank_index, rhs_bank_offset) do { \
+    const u8_t len = (dest_bank_index == 0) ? 1 : FPU_BITS_LEN(ctx); \
+    const u8_t stride = FPU_BITS_STRIDE(ctx); \
     const u8_t rhs_stride = rhs_bank_index == 0 ? 0 : stride; \
     arm_fpu_bank dst = {.index = dest_bank_index, .offset = dest_bank_offset}; \
     arm_fpu_bank lhs = {.index = lhs_bank_index, .offset = lhs_bank_offset}; \
@@ -1266,9 +1267,9 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     } \
 } while(0)
 
-#define ARM_FPU_PERFORM_OP1_ALL(ctx, action, float_type, bank_size, dest_bank_index, dest_bank_offset, op_bank_index, op_bank_offset) do { \
-    const u8_t len = (dest_bank_index == 0) ? 1 : ARM_FPU_BITS_LEN(ctx); \
-    const u8_t stride = ARM_FPU_BITS_STRIDE(ctx); \
+#define FPU_PERFORM_OP1_ALL(ctx, action, float_type, bank_size, dest_bank_index, dest_bank_offset, op_bank_index, op_bank_offset) do { \
+    const u8_t len = (dest_bank_index == 0) ? 1 : FPU_BITS_LEN(ctx); \
+    const u8_t stride = FPU_BITS_STRIDE(ctx); \
     const u8_t op_stride = op_bank_index == 0 ? 0 : stride; \
     arm_fpu_bank dst = {.index = dest_bank_index, .offset = dest_bank_offset}; \
     arm_fpu_bank op = {.index = op_bank_index, .offset = op_bank_offset}; \
@@ -1294,9 +1295,9 @@ static inline u32_t ATTR_FUNC_BASE ARM_CPU_PERFORM_clz(arm_cpu_ctx* const ctx, c
     } \
 } while(0)
 
-#define ARM_FPU_PERFORM_ARITH_ALL(ctx, action, float_type, bank_size, dest_bank_index, dest_bank_offset, lhs_bank_index, lhs_bank_offset, rhs_bank_index, rhs_bank_offset) do { \
-    const u8_t len = (dest_bank_index == 0) ? 1 : ARM_FPU_BITS_LEN(ctx); \
-    const u8_t stride = ARM_FPU_BITS_STRIDE(ctx); \
+#define FPU_PERFORM_ARITH_ALL(ctx, action, float_type, bank_size, dest_bank_index, dest_bank_offset, lhs_bank_index, lhs_bank_offset, rhs_bank_index, rhs_bank_offset) do { \
+    const u8_t len = (dest_bank_index == 0) ? 1 : FPU_BITS_LEN(ctx); \
+    const u8_t stride = FPU_BITS_STRIDE(ctx); \
     const u8_t rhs_stride = rhs_bank_index == 0 ? 0 : stride; \
     arm_fpu_bank dst = {.index = dest_bank_index, .offset = dest_bank_offset}; \
     arm_fpu_bank lhs = {.index = lhs_bank_index, .offset = lhs_bank_offset}; \

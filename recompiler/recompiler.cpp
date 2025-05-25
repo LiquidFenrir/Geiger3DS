@@ -292,26 +292,26 @@ struct ProcessDisasmContext {
 };
 
 #define INSN_APPEND_LDREX_TYPE(c_ldr_type) \
-    result += std::format("ARM_CPU_PERFORM_LDREX_ALL(ctx, ctx->{}, " #c_ldr_type ", ctx->{});", \
+    result += std::format("CPU_PERFORM_LDREX_ALL(ctx, ctx->{}, " #c_ldr_type ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.base));
 
 #define INSN_APPEND_LDREXD() \
-    result += std::format("ARM_CPU_PERFORM_LDREXD(ctx, ctx->{}, ctx->{}, ctx->{});", \
+    result += std::format("CPU_PERFORM_LDREXD(ctx, ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.base));
 
 #define INSN_APPEND_STREX_TYPE(c_str_type, c_str_and) \
-    result += std::format("ARM_CPU_PERFORM_STREX_ALL(ctx, ctx->{}, ctx->{}, " #c_str_type ", " #c_str_and ", ctx->{});", \
+    result += std::format("CPU_PERFORM_STREX_ALL(ctx, ctx->{}, ctx->{}, " #c_str_type ", " #c_str_and ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.base));
 
 #define INSN_APPEND_STREXD() \
-    result += std::format("ARM_CPU_PERFORM_STREXD(ctx, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
+    result += std::format("CPU_PERFORM_STREXD(ctx, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[3].mem.base));
 
 #define INSN_APPEND_LDR_TYPE(c_ldr_type, c_ldr_cast) \
-    result += std::format("ARM_CPU_PERFORM_LDR_ALL(ctx, ctx->{}, " #c_ldr_type ", " #c_ldr_cast ", ctx->{}, ", \
+    result += std::format("CPU_PERFORM_LDR_ALL(ctx, ctx->{}, " #c_ldr_type ", " #c_ldr_cast ", ctx->{}, ", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.base)); \
     if(insn.detail->arm.operands[1].subtracted) \
         result += "-"; \
@@ -335,7 +335,7 @@ struct ProcessDisasmContext {
     result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
 
 #define INSN_APPEND_STR_TYPE(c_str_type, c_str_and) \
-    result += std::format("ARM_CPU_PERFORM_STR_ALL(ctx, ctx->{}, " #c_str_type ", " #c_str_and ", ctx->{}, ", \
+    result += std::format("CPU_PERFORM_STR_ALL(ctx, ctx->{}, " #c_str_type ", " #c_str_and ", ctx->{}, ", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].mem.base)); \
     if(insn.detail->arm.operands[1].subtracted) \
         result += "-"; \
@@ -357,7 +357,7 @@ struct ProcessDisasmContext {
     result += std::format("), {}, {});", (int)insn.detail->writeback, (int)insn.detail->arm.post_index);
 
 #define INSN_APPEND_POP(c_ldm_type, c_ldm_init, c_ldm_step, c_ldm_final) \
-    result += std::format("ARM_CPU_PERFORM_LDM_ALL(ctx, ctx->sp, 1, {}, {}, {}, ", c_ldm_init, c_ldm_step, c_ldm_final); \
+    result += std::format("CPU_PERFORM_LDM_ALL(ctx, ctx->sp, 1, {}, {}, {}, ", c_ldm_init, c_ldm_step, c_ldm_final); \
     { \
     bool have_pc_in_list = false; \
     for(int reg_idx = 0; reg_idx < insn.detail->arm.op_count; ++reg_idx) { \
@@ -368,7 +368,7 @@ struct ProcessDisasmContext {
     }
 
 #define INSN_APPEND_LDM(c_ldm_type, c_ldm_init, c_ldm_step, c_ldm_final) \
-    result += std::format("ARM_CPU_PERFORM_LDM_ALL(ctx, ctx->{}, {}, {}, {}, {}, ", \
+    result += std::format("CPU_PERFORM_LDM_ALL(ctx, ctx->{}, {}, {}, {}, {}, ", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), (int)insn.detail->writeback, c_ldm_init, c_ldm_step, c_ldm_final); \
     { \
     bool have_pc_in_list = false; \
@@ -380,13 +380,13 @@ struct ProcessDisasmContext {
     }
 
 #define INSN_APPEND_PUSH(c_stm_type, c_stm_init, c_stm_step, c_stm_final) \
-    result += std::format("ARM_CPU_PERFORM_STM_ALL(ctx, ctx->sp, 1, {}, {}, {}, ", c_stm_init, c_stm_step, c_stm_final); \
+    result += std::format("CPU_PERFORM_STM_ALL(ctx, ctx->sp, 1, {}, {}, {}, ", c_stm_init, c_stm_step, c_stm_final); \
     for(int reg_idx = 0; reg_idx < insn.detail->arm.op_count; ++reg_idx) \
         result += std::format("(" #c_stm_type ", {}, {})", reg_idx, cs_reg_name(*state.handle, insn.detail->arm.operands[reg_idx].reg)); \
     result += ");";
 
 #define INSN_APPEND_STM(c_stm_type, c_stm_init, c_stm_step, c_stm_final) \
-    result += std::format("ARM_CPU_PERFORM_STM_ALL(ctx, ctx->{}, {}, {}, {}, {}, ", \
+    result += std::format("CPU_PERFORM_STM_ALL(ctx, ctx->{}, {}, {}, {}, {}, ", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), (int)insn.detail->writeback, c_stm_init, c_stm_step, c_stm_final); \
     for(int reg_idx = 1; reg_idx < insn.detail->arm.op_count; ++reg_idx) \
         result += std::format("(" #c_stm_type ", {}, {})", reg_idx - 1, cs_reg_name(*state.handle, insn.detail->arm.operands[reg_idx].reg)); \
@@ -398,39 +398,39 @@ struct ProcessDisasmContext {
         result += std::format("ctx->{}", cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg)); \
         break; \
     case arm_shifter::ARM_SFT_ASR: \
-        result += std::format("ARM_CPU_PERFORM_ASR(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
+        result += std::format("CPU_PERFORM_ASR(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, insn.detail->arm.operands[c_op_idx].shift.value); \
         break; \
     case arm_shifter::ARM_SFT_LSL: \
-        result += std::format("ARM_CPU_PERFORM_LSL(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
+        result += std::format("CPU_PERFORM_LSL(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, insn.detail->arm.operands[c_op_idx].shift.value); \
         break; \
     case arm_shifter::ARM_SFT_LSR: \
-        result += std::format("ARM_CPU_PERFORM_LSR(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
+        result += std::format("CPU_PERFORM_LSR(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, insn.detail->arm.operands[c_op_idx].shift.value); \
         break; \
     case arm_shifter::ARM_SFT_ROR: \
-        result += std::format("ARM_CPU_PERFORM_ROR(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
+        result += std::format("CPU_PERFORM_ROR(ctx, ctx->{}, arm_cpu_update_carry_flag_constant_operand2(ctx, {}, {}))", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, insn.detail->arm.operands[c_op_idx].shift.value); \
         break; \
     case arm_shifter::ARM_SFT_RRX: \
-        result += std::format("ARM_CPU_PERFORM_RRX(ctx, ctx->{}, {})", \
+        result += std::format("CPU_PERFORM_RRX(ctx, ctx->{}, {})", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags); \
         break; \
     case arm_shifter::ARM_SFT_ASR_REG: \
-        result += std::format("ARM_CPU_PERFORM_asr_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("CPU_PERFORM_asr_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     case arm_shifter::ARM_SFT_LSL_REG: \
-        result += std::format("ARM_CPU_PERFORM_lsl_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("CPU_PERFORM_lsl_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     case arm_shifter::ARM_SFT_LSR_REG: \
-        result += std::format("ARM_CPU_PERFORM_lsr_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("CPU_PERFORM_lsr_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     case arm_shifter::ARM_SFT_ROR_REG: \
-        result += std::format("ARM_CPU_PERFORM_ror_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
+        result += std::format("CPU_PERFORM_ror_REG(ctx, ctx->{}, {}, ctx->{} & 0xff)", \
         cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].reg), (int)c_op_updates_flags, cs_reg_name(*state.handle, insn.detail->arm.operands[c_op_idx].shift.value)); \
         break; \
     default: \
@@ -439,36 +439,36 @@ struct ProcessDisasmContext {
     } else if(insn.detail->arm.operands[c_op_idx].type == arm_op_type::ARM_OP_IMM) result += std::format("{}", insn.detail->arm.operands[c_op_idx].imm);
 
 #define INSN_APPEND_XT_TYPE(c_basic_type, c_extend_type, c_and_mask) \
-    result += std::format("ARM_CPU_PERFORM_XT(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ");", \
+    result += std::format("CPU_PERFORM_XT(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ");", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     (insn.detail->arm.operands[1].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0));
 
 #define INSN_APPEND_XTA_TYPE(c_basic_type, c_extend_type, c_and_mask) \
-    result += std::format("ARM_CPU_PERFORM_XTA(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ", ctx->{});", \
+    result += std::format("CPU_PERFORM_XTA(ctx, ctx->{}, ctx->{}, {}, " #c_and_mask ", " #c_basic_type ", " #c_extend_type ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg), \
     (insn.detail->arm.operands[2].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
 
 #define INSN_APPEND_XTB16_TYPE(c_basic_type, c_extend_type) \
-    result += std::format("ARM_CPU_PERFORM_XTB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ");", \
+    result += std::format("CPU_PERFORM_XTB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ");", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     (insn.detail->arm.operands[1].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0));
 
 #define INSN_APPEND_XTAB16_TYPE(c_basic_type, c_extend_type) \
-    result += std::format("ARM_CPU_PERFORM_XTAB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ", ctx->{});", \
+    result += std::format("CPU_PERFORM_XTAB16(ctx, ctx->{}, ctx->{}, {}, " #c_basic_type ", " #c_extend_type ", ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg), \
     (insn.detail->arm.operands[2].shift.type == arm_shifter::ARM_SFT_ROR ? insn.detail->arm.operands[1].shift.value : 0), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
 
 #define INSN_APPEND_MUL() \
-    result += std::format("ARM_CPU_PERFORM_MUL(ctx, {}, ctx->{}, ctx->{}, ctx->{});", \
+    result += std::format("CPU_PERFORM_MUL(ctx, {}, ctx->{}, ctx->{}, ctx->{});", \
     (int)insn.detail->arm.update_flags, \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
 
 #define INSN_APPEND_MLA() \
-    result += std::format("ARM_CPU_PERFORM_MLA(ctx, {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
+    result += std::format("CPU_PERFORM_MLA(ctx, {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
     (int)insn.detail->arm.update_flags, \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
@@ -476,7 +476,7 @@ struct ProcessDisasmContext {
     cs_reg_name(*state.handle, insn.detail->arm.operands[3].reg));
 
 #define INSN_APPEND_MUL_MLA_LONG_TYPE(c_mul_mla_kind, c_base_type) \
-    result += std::format("ARM_CPU_PERFORM_x" #c_mul_mla_kind "L(ctx, " #c_base_type ", {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
+    result += std::format("CPU_PERFORM_x" #c_mul_mla_kind "L(ctx, " #c_base_type ", {}, ctx->{}, ctx->{}, ctx->{}, ctx->{});", \
     (int)insn.detail->arm.update_flags, \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
@@ -484,13 +484,13 @@ struct ProcessDisasmContext {
     cs_reg_name(*state.handle, insn.detail->arm.operands[3].reg));
 
 #define INSN_APPEND_SIMD_N_TYPE(c_base_type, c_bitness, c_operation) \
-    result += std::format("ARM_CPU_PERFORM_SIMD_" #c_bitness "_TYPE(ctx, " #c_base_type ", " #c_operation ", ctx->{}, ctx->{}, ctx->{});", \
+    result += std::format("CPU_PERFORM_SIMD_" #c_bitness "_TYPE(ctx, " #c_base_type ", " #c_operation ", ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
     
 #define INSN_APPEND_SIMD_16_DUAL_TYPE(c_base_type, c_operation_top, c_operation_bottom) \
-    result += std::format("ARM_CPU_PERFORM_SIMD_16_DUAL_TYPE(ctx, " #c_base_type ", " #c_operation_top ", " #c_operation_bottom ", ctx->{}, ctx->{}, ctx->{});", \
+    result += std::format("CPU_PERFORM_SIMD_16_DUAL_TYPE(ctx, " #c_base_type ", " #c_operation_top ", " #c_operation_bottom ", ctx->{}, ctx->{}, ctx->{});", \
     cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg), \
     cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg));
@@ -729,7 +729,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         //     cond_printf("op %d: type %d\n", i, insn.detail->arm.operands[i].type);
         //     if(insn.detail->arm.operands[i].type == arm_op_type::ARM_OP_SYSREG)
         //     {
-        //         cond_printf("ARM_OP_SYSREG: mclasssysreg: %04x\n", (int)insn.detail->arm.operands[i].sysop.reg.mclasssysreg);
+        //         cond_printf("OP_SYSREG: mclasssysreg: %04x\n", (int)insn.detail->arm.operands[i].sysop.reg.mclasssysreg);
         //     }
         // }
         if(insn.detail->arm.cc == ARMCC_UNDEF)
@@ -738,7 +738,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
 
         std::string result;
-        result += std::format("arm_cpu_update_pc(ctx, 0x{:08x}, {});\n", insn.address, in_thumb_mode ? "ARM_CPU_PC_AHEAD_THUMB" : "ARM_CPU_PC_AHEAD_ARM");
+        result += std::format("arm_cpu_update_pc(ctx, 0x{:08x}, {});\n", insn.address, in_thumb_mode ? "CPU_PC_AHEAD_THUMB" : "CPU_PC_AHEAD_ARM");
         if(insn.detail->arm.cc != ARMCC_AL && insn.detail->arm.cc != ARMCC_UNDEF)
         {
             result += std::format("if(arm_cpu_check_cc(ctx, arm_cpu_cc_{}))", ARMCondCodeToString(insn.detail->arm.cc));
@@ -831,7 +831,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             const uint64_t branch_target = insn.detail->arm.operands[0].imm;
             if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
             {
-                result += std::format("ARM_CPU_PERFORM_{}_B(ctx, 0x{:08x});", label_kind, branch_target);
+                result += std::format("CPU_PERFORM_{}_B(ctx, 0x{:08x});", label_kind, branch_target);
                 ctx.add_branch({(u32)branch_target, false, in_thumb_mode, true, insn.detail->arm.cc});
             }
             // if unconditional, or the opposite of the last conditional branch without a flag setting inbetween, assume return
@@ -858,7 +858,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
         case ARM_INS_BX: {
             const auto branch_target_reg = insn.detail->arm.operands[0].reg;
-            result += std::format("ARM_CPU_PERFORM_BX(ctx, ctx->{});", cs_reg_name(*state.handle, branch_target_reg));
+            result += std::format("CPU_PERFORM_BX(ctx, ctx->{});", cs_reg_name(*state.handle, branch_target_reg));
             // if(auto it = last_known_reg_value.find((arm_reg)branch_target_reg); it != last_known_reg_value.end() && it->second.second)
             // {
             //     const auto value = it->second.first;
@@ -880,7 +880,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             const uint64_t branch_target = insn.detail->arm.operands[0].imm;
             if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
             {
-                result += std::format("ARM_CPU_PERFORM_{}_BL(ctx, 0x{:08x});", label_kind, branch_target);
+                result += std::format("CPU_PERFORM_{}_BL(ctx, 0x{:08x});", label_kind, branch_target);
                 ctx.add_branch({(u32)branch_target, true, in_thumb_mode, true});
             }
             last_is_uncond_bl = true;
@@ -891,7 +891,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             if(insn.detail->arm.operands[0].type == ARM_OP_REG)
             {
                 const auto branch_target_reg = insn.detail->arm.operands[0].reg;
-                result += std::format("ARM_CPU_PERFORM_BLX_REG(ctx, ctx->{});", cs_reg_name(*state.handle, branch_target_reg));
+                result += std::format("CPU_PERFORM_BLX_REG(ctx, ctx->{});", cs_reg_name(*state.handle, branch_target_reg));
                 // if(auto it = last_known_reg_value.find((arm_reg)branch_target_reg); it != last_known_reg_value.end() && it->second.second)
                 // {
                 //     const auto value = it->second.first;
@@ -907,7 +907,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 const uint64_t branch_target = insn.detail->arm.operands[0].imm;
                 if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
                 {
-                    result += std::format("ARM_CPU_PERFORM_{}_BLX_IMM(ctx, 0x{:08x});", label_kind, branch_target);
+                    result += std::format("CPU_PERFORM_{}_BLX_IMM(ctx, 0x{:08x});", label_kind, branch_target);
                     ctx.add_branch({(u32)(branch_target), true, !in_thumb_mode, true});
                 }
             }
@@ -932,7 +932,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
         
         case ARM_INS_MCR: {
-            result += std::format("ARM_CPU_PERFORM_MCR(ctx, ctx->{}, {}, {}, {}, {}, {});",
+            result += std::format("CPU_PERFORM_MCR(ctx, ctx->{}, {}, {}, {}, {}, {});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg),
                 insn.detail->arm.operands[0].imm, /* ARM_OP_PIMM */
                 insn.detail->arm.operands[1].imm,
@@ -943,7 +943,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             break;
         }
         case ARM_INS_MRC: {
-            result += std::format("ARM_CPU_PERFORM_MRC(ctx, ctx->{}, {}, {}, {}, {}, {});",
+            result += std::format("CPU_PERFORM_MRC(ctx, ctx->{}, {}, {}, {}, {}, {});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg),
                 insn.detail->arm.operands[0].imm, /* ARM_OP_PIMM */
                 insn.detail->arm.operands[1].imm,
@@ -1053,14 +1053,14 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             }
             [[fallthrough]];
         case ARM_INS_CMN: {
-            result += std::format("ARM_CPU_PERFORM_FLAGS_{}(ctx, ctx->{}, ", cs_insn_name(*state.handle, insn.id), cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+            result += std::format("CPU_PERFORM_FLAGS_{}(ctx, ctx->{}, ", cs_insn_name(*state.handle, insn.id), cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             INSN_APPEND_operand2(0, 1);
             result += ");";
             break;
         }
         case ARM_INS_TST:
         case ARM_INS_TEQ: {
-            result += std::format("ARM_CPU_PERFORM_FLAGS_{}(ctx, ctx->{}, ", cs_insn_name(*state.handle, insn.id), cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
+            result += std::format("CPU_PERFORM_FLAGS_{}(ctx, ctx->{}, ", cs_insn_name(*state.handle, insn.id), cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             INSN_APPEND_operand2(1, 1);
             result += ");";
             break;
@@ -1070,7 +1070,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         case ARM_INS_REV16:
         case ARM_INS_REVSH:
         case ARM_INS_CLZ: {
-            result += std::format("ctx->{} = ARM_CPU_PERFORM_{}(ctx, ctx->{});",
+            result += std::format("ctx->{} = CPU_PERFORM_{}(ctx, ctx->{});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_insn_name(*state.handle, insn.id),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
@@ -1178,7 +1178,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             const FPUBankOperand op_a_bank = FPUBankOperand((arm_reg)insn.detail->arm.operands[1].reg, real_type_f64);
             const FPUBankOperand op_b_bank = FPUBankOperand((arm_reg)insn.detail->arm.operands[2].reg, real_type_f64);
             // ct, type, banksize, dest bank, lhs bank, rhs bank
-            result += std::format("ARM_FPU_PERFORM_ARITH_ALL(ctx, {}, {}, {}, {}, {}, {}, {}, {}, {});\n"
+            result += std::format("FPU_PERFORM_ARITH_ALL(ctx, {}, {}, {}, {}, {}, {}, {}, {}, {});\n"
                 , cs_insn_name(*state.handle, insn.id)
                 , real_type_f64 ? "f64" : "f32"
                 , real_type_f64 ? 4 : 8
@@ -1199,7 +1199,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             const FPUBankOperand op_a_bank((arm_reg)insn.detail->arm.operands[1].reg, real_type_f64);
             const FPUBankOperand op_b_bank((arm_reg)insn.detail->arm.operands[2].reg, real_type_f64);
 
-            result += std::format("ARM_FPU_PERFORM_VMUL_ALL(ctx, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});\n"
+            result += std::format("FPU_PERFORM_VMUL_ALL(ctx, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});\n"
                 , real_type_f64 ? "f64" : "f32"
                 , real_type_f64 ? 4 : 8
                 // operation on the summand value
@@ -1220,7 +1220,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             const FPUBankOperand dest_bank((arm_reg)insn.detail->arm.operands[0].reg, real_type_f64);
             const FPUBankOperand src_bank((arm_reg)insn.detail->arm.operands[1].reg, real_type_f64);
 
-            result += std::format("ARM_FPU_PERFORM_OP1_ALL(ctx, {}, {}, {}, {}, {}, {}, {});\n"
+            result += std::format("FPU_PERFORM_OP1_ALL(ctx, {}, {}, {}, {}, {}, {}, {});\n"
                 , cs_insn_name(*state.handle, insn.id)
                 , real_type_f64 ? "f64" : "f32"
                 , real_type_f64 ? 4 : 8
@@ -1293,7 +1293,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         case ARM_INS_SBC:
         case ARM_INS_RSB:
         case ARM_INS_RSC: {
-            result += std::format("ctx->{} = ARM_CPU_PERFORM_{}(ctx, {}, ctx->{}, ",
+            result += std::format("ctx->{} = CPU_PERFORM_{}(ctx, {}, ctx->{}, ",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_insn_name(*state.handle, insn.id), (int)insn.detail->arm.update_flags,
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg));
@@ -1305,7 +1305,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     assert(false && "Attempt to use a flag setting arithmetic insn with PC as Rd");
                 else
                 {
-                    result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                    result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                     if(insn.detail->arm.cc == ARMCC_AL)
                     {
                         uncond_branch = true;
@@ -1447,7 +1447,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         case ARM_INS_LSL:
         case ARM_INS_LSR:
         case ARM_INS_ROR: {
-            result += std::format("ctx->{} = ARM_CPU_PERFORM_{}_REG(ctx, ctx->{}, {}, ",
+            result += std::format("ctx->{} = CPU_PERFORM_{}_REG(ctx, ctx->{}, {}, ",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_insn_name(*state.handle, insn.id),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
@@ -1461,7 +1461,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1471,7 +1471,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             break;
         }
         case ARM_INS_RRX: {
-            result += std::format("ctx->{} = ARM_CPU_PERFORM_RRX(ctx, ctx->{}, {});\n",
+            result += std::format("ctx->{} = CPU_PERFORM_RRX(ctx, ctx->{}, {});\n",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
                 (int)insn.detail->arm.update_flags);
@@ -1479,7 +1479,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1498,7 +1498,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1523,7 +1523,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1542,7 +1542,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1561,7 +1561,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1580,7 +1580,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1599,7 +1599,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 result += std::format("arm_cpu_update_flags_NZ_32(ctx, ctx->{});", cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg));
             else if(insn.detail->arm.operands[0].reg == arm_reg::ARM_REG_PC)
             {
-                result += std::format("ARM_CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
+                result += std::format("CPU_PERFORM_BRANCH_REG(ctx, ctx->pc);");
                 if(insn.detail->arm.cc == ARMCC_AL)
                 {
                     uncond_branch = true;
@@ -1685,7 +1685,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
 
         case ARM_INS_SEL: {
-            result += std::format("ARM_CPU_PERFORM_SEL(ctx, ctx->{}, ctx->{}, ctx->{});",
+            result += std::format("CPU_PERFORM_SEL(ctx, ctx->{}, ctx->{}, ctx->{});",
                 cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
                 cs_reg_name(*state.handle, insn.detail->arm.operands[2].reg)
@@ -1780,7 +1780,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
 
         case ARM_INS_CLREX: {
-            result += "ARM_CPU_PERFORM_CLREX(ctx);";
+            result += "CPU_PERFORM_CLREX(ctx);";
             break;
         }
         
@@ -1936,7 +1936,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             break;
         }
         case ARM_INS_LDRD: {
-            result += std::format("ARM_CPU_PERFORM_LDRD(ctx, ctx->{}, ctx->{}, ctx->{}, ",
+            result += std::format("CPU_PERFORM_LDRD(ctx, ctx->{}, ctx->{}, ctx->{}, ",
             cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
             cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.base));
             if(insn.detail->arm.operands[1].subtracted)
@@ -2016,7 +2016,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             break;
         }
         case ARM_INS_STRD: {
-            result += std::format("ARM_CPU_PERFORM_STRD(ctx, ctx->{}, ctx->{}, ctx->{}, ",
+            result += std::format("CPU_PERFORM_STRD(ctx, ctx->{}, ctx->{}, ctx->{}, ",
             cs_reg_name(*state.handle, insn.detail->arm.operands[0].reg), cs_reg_name(*state.handle, insn.detail->arm.operands[1].reg),
             cs_reg_name(*state.handle, insn.detail->arm.operands[2].mem.base));
             if(insn.detail->arm.operands[1].subtracted)
@@ -2338,14 +2338,15 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     const std::string labels_arm_file_path = filename + ".lab.arm.c";
     const std::string labels_thumb_file_path = filename + ".lab.thumb.c";
     FILE_ptr source_file_ptr{do_dummy_save ? nullptr : fopen(source_file_path.c_str(), "wb")};
-    FILE_ptr labels_arm_file_ptr{do_dummy_save ? nullptr : fopen(labels_arm_file_path.c_str(), "wb")};
-    FILE_ptr labels_thumb_file_ptr{do_dummy_save ? nullptr : fopen(labels_thumb_file_path.c_str(), "wb")};
+    // FILE_ptr labels_arm_file_ptr{do_dummy_save ? nullptr : fopen(labels_arm_file_path.c_str(), "wb")};
+    // FILE_ptr labels_thumb_file_ptr{do_dummy_save ? nullptr : fopen(labels_thumb_file_path.c_str(), "wb")};
     auto source_file = source_file_ptr.get();
-    auto labels_arm_file = labels_arm_file_ptr.get();
-    auto labels_thumb_file = labels_thumb_file_ptr.get();
+    // auto labels_arm_file = labels_arm_file_ptr.get();
+    // auto labels_thumb_file = labels_thumb_file_ptr.get();
 
-    safe_fprintf(source_file, "void ATTR_FASTCALL ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
+    safe_fprintf(source_file, "void ATTR_CALLCONV ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
 
+    /*
     safe_fprintf(source_file, "{\n");
     safe_fprintf(source_file, "arm_code_bank* bank = NULL;\n");
     safe_fprintf(source_file, "for(bank = ctx->code_banks; bank && !(bank->start_addr <= ctx->pc && ctx->pc < bank->end_addr); bank = bank->next_bank);\n");
@@ -2353,10 +2354,11 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     safe_fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
     safe_fprintf(source_file, "}\n");
     safe_fprintf(source_file, "arm_cpu_instr_entry_setup_done(ctx);\n"); // will go back to the action if CRO, otherwise continue to start the program
-    safe_fprintf(source_file, "ARM_CPU_PERFORM_BX(ctx, ctx->pc);\n");
+    safe_fprintf(source_file, "CPU_PERFORM_BX(ctx, ctx->pc);\n");
+    */
 
-    safe_fprintf(source_file, "LABEL_ARM_error:\n");
-    safe_fprintf(source_file, "LABEL_THUMB_error:\n");
+    safe_fprintf(source_file, "LAB_ARM_error:\n");
+    safe_fprintf(source_file, "LAB_THUMB_error:\n");
     safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx);\n");
 
     /*
@@ -2369,8 +2371,8 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     safe_fprintf(source_file, "};\n");
     */
 
-    safe_fprintf(source_file, "LABEL_ARM_start:\n");
-    safe_fprintf(source_file, "LABEL_THUMB_start:\n");
+    safe_fprintf(source_file, "LAB_ARM_start:\n");
+    safe_fprintf(source_file, "LAB_THUMB_start:\n");
 
     const char* label_kind = "ARM";
     uint64_t insn_addr_previous = start_addr - 4;
@@ -2385,13 +2387,13 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             {
                 cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
-            // safe_fprintf(labels_arm_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
+            // safe_fprintf(labels_arm_file, "&&LAB_%s_error - &&LAB_%s_start,\n", label_kind, label_kind);
         }
 
-        // safe_fprintf(labels_arm_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, insn_address, label_kind);
-        // safe_fprintf(labels_arm_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entry_arm = &&LABEL_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, label_kind, insn_address);
-        safe_fprintf(labels_arm_file, "ARM_SETUP_LABEL(0x%08llx, 0x%08llx, entry_arm, %s);\n", insn_address, (uint64_t)start_addr, label_kind);
-        safe_fprintf(source_file, "LABEL_%s_0x%08llx:\n", label_kind, insn_address);
+        // safe_fprintf(labels_arm_file, "&&LAB_%s_0x%08llx - &&LAB_%s_start,\n", label_kind, insn_address, label_kind);
+        // safe_fprintf(labels_arm_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entry_arm = &&LAB_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, label_kind, insn_address);
+        // safe_fprintf(labels_arm_file, "SETUP_LABEL(0x%08llx, 0x%08llx, entry_arm, %s);\n", insn_address, (uint64_t)start_addr, label_kind);
+        safe_fprintf(source_file, "LAB_%s_0x%08llx:\n", label_kind, insn_address);
         safe_fwrite(insn_text.data(), 1, insn_text.size(), source_file);
         safe_fprintf(source_file, "\n");
     }
@@ -2411,14 +2413,14 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             {
                 cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
-            // safe_fprintf(labels_thumb_file, "&&LABEL_%s_error - &&LABEL_%s_start,\n", label_kind, label_kind);
+            // safe_fprintf(labels_thumb_file, "&&LAB_%s_error - &&LAB_%s_start,\n", label_kind, label_kind);
         }
 
-        // safe_fprintf(labels_thumb_file, "&&LABEL_%s_0x%08llx - &&LABEL_%s_start,\n", label_kind, active_address, label_kind);
-        // safe_fprintf(labels_thumb_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entries_thumb[(0x%08llx & 2) >> 1] = &&LABEL_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, insn_address, label_kind, insn_address);
-        safe_fprintf(labels_thumb_file, "ARM_SETUP_LABEL(0x%08llx, 0x%08llx, entries_thumb[%lld], %s);\n", insn_address, (uint64_t)start_addr, ((insn_address & 2) >> 1), label_kind);
+        // safe_fprintf(labels_thumb_file, "&&LAB_%s_0x%08llx - &&LAB_%s_start,\n", label_kind, active_address, label_kind);
+        // safe_fprintf(labels_thumb_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entries_thumb[(0x%08llx & 2) >> 1] = &&LAB_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, insn_address, label_kind, insn_address);
+        // safe_fprintf(labels_thumb_file, "SETUP_LABEL(0x%08llx, 0x%08llx, entries_thumb[%lld], %s);\n", insn_address, (uint64_t)start_addr, ((insn_address & 2) >> 1), label_kind);
 
-        safe_fprintf(source_file, "LABEL_%s_0x%08llx:\n", label_kind, active_address);
+        safe_fprintf(source_file, "LAB_%s_0x%08llx:\n", label_kind, active_address);
         fwrite(insn_text.data(), 1, insn_text.size(), source_file);
         safe_fprintf(source_file, "\n");
     }

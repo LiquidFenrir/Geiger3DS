@@ -6,11 +6,15 @@ target_compile_options(recompiler PRIVATE
     -Wall -Wextra -Wno-psabi
     -Wno-unused-parameter
     -Wno-unused-variable
+    # -Wno-unused-but-set-variable
 
     # C++ specific options
     $<$<COMPILE_LANGUAGE:CXX>:-fexceptions -frtti>
 )
-target_link_libraries(recompiler PRIVATE -static capstone arm-context)
+target_link_libraries(recompiler PRIVATE -static
+    arm-context # cpu struct
+    capstone # disassembler library
+)
 target_sources(recompiler PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/recompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/embed_header.c

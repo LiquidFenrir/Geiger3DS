@@ -6,11 +6,15 @@ target_compile_options(runner PRIVATE
     -Wall -Wextra -Wno-psabi
     -Wno-unused-parameter
     -Wno-unused-variable
+    # -Wno-unused-but-set-variable
 
     # C++ specific options
     $<$<COMPILE_LANGUAGE:CXX>:-fexceptions -frtti>
 )
-target_link_libraries(runner PRIVATE -static arm-context WinHvPlatform WinHvEmulation)
+target_link_libraries(runner PRIVATE -static
+    arm-context # cpu struct
+    WinHvPlatform WinHvEmulation # winapi hypervisor DLLs
+)
 target_sources(runner PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/runner.cpp
 )

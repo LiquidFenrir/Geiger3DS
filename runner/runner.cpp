@@ -92,11 +92,11 @@ struct unique_virtualalloc_ptr {
         return ptr;
     }
 
-    bool operator==(std::nullptr_t n) const
+    bool operator==(std::nullptr_t) const
     {
         return ptr == nullptr;
     }
-    bool operator!=(std::nullptr_t n) const
+    bool operator!=(std::nullptr_t) const
     {
         return ptr != nullptr;
     }
