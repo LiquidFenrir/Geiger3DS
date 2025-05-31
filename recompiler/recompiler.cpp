@@ -25,8 +25,6 @@ extern "C" {
 #define safe_fwrite(buf, elem_size, elem_count, fh) do { const auto fh_ = (fh); const auto buf_ = (buf); \
     if(fh_ && buf_) fwrite(buf_, elem_size, elem_count, fh_); } while(0)
 #define cond_printf(...) do { if(!ctx.suppress_print) printf(__VA_ARGS__); } while(0)
-using u32 = std::uint32_t;
-using u8 = std::uint8_t;
 
 struct cs_insn_deleter {
     void operator()(cs_insn* ptr)
@@ -44,18 +42,22 @@ struct FILE_deleter {
 };
 using FILE_ptr = std::unique_ptr<FILE, FILE_deleter>;
 
+// a has to be a power of two
+#define ALIGN_TO_NUM(n, a) (((n) + ((a) - 1u)) & -(a))
+#define ALIGN_PAGE_NUM(n) ALIGN_TO_NUM(n, 0x1000u)
+
 #define DISASM_LIST_UNIMPL 1
 struct ProcessDisasmContext {
-    const u32 start_addr;
-    const u32 start_code_addr;
-    const std::span<const u8> start_code;
-    const u32 end_code_addr;
-    const u32 start_rodata_addr;
-    const std::span<const u8> start_rodata;
-    const u32 end_rodata_addr;
-    const u32 start_data_addr;
-    const std::span<const u8> start_data;
-    const u32 end_data_addr;
+    struct Section {
+        std::span<const u8_t> bytes;
+        u32_t start_addr, end_addr;
+
+        Section(std::span<const u8_t> bytes_in, u32_t start_addr_in) noexcept
+            : bytes(bytes_in), start_addr(start_addr_in), end_addr(start_addr_in + bytes_in.size())
+        { }
+    };
+    const Section code_sec, rodata_sec, data_sec;
+    const u32_t start_addr;
     const bool allow_thumb;
     bool suppress_print{false};
 
@@ -70,7 +72,7 @@ struct ProcessDisasmContext {
         bool is_unrecover_branch{false};
         bool is_function_start{false};
         bool failed_guess{false};
-        u32 has_adr_start{0};
+        u32_t has_adr_start{0};
 
         void reset()
         {
@@ -79,59 +81,59 @@ struct ProcessDisasmContext {
             is_function_start = false;
         }
     };
-    std::vector<MappingValue> analyzed{(start_code.size() / 4) * 3};
-    std::span<const u8> get_from_pointer(const u32 addr, const u32 size)
+    std::vector<MappingValue> analyzed{(code_sec.bytes.size() / 4) * 3};
+    std::span<const u8_t> get_from_pointer(const u32_t addr, const u32_t size)
     {
-        if(start_code_addr <= addr && addr + size <= end_code_addr)
+        if(code_sec.start_addr <= addr && addr + size <= code_sec.end_addr)
         {
             const auto offset = get_offset_text(addr);
-            return start_code.subspan(offset, size);
+            return code_sec.bytes.subspan(offset, size);
         }
-        else if(start_rodata_addr <= addr && addr + size <= end_rodata_addr)
+        else if(rodata_sec.start_addr <= addr && addr + size <= rodata_sec.end_addr)
         {
             const auto offset = get_offset_rodata(addr);
-            return start_rodata.subspan(offset, size);
+            return rodata_sec.bytes.subspan(offset, size);
         }
-        else if(start_data_addr <= addr && addr + size <= end_data_addr)
+        else if(data_sec.start_addr <= addr && addr + size <= data_sec.end_addr)
         {
             const auto offset = get_offset_data(addr);
-            return start_data.subspan(offset, size);
+            return data_sec.bytes.subspan(offset, size);
         }
         return {};
     }
 
-    std::size_t get_offset(const u32 addr)
+    std::size_t get_offset(const u32_t addr)
     {
         return addr - start_addr;
     }
-    std::size_t get_offset_text(const u32 addr)
+    std::size_t get_offset_text(const u32_t addr)
     {
-        return addr - start_code_addr;
+        return addr - code_sec.start_addr;
     }
-    std::size_t get_offset_rodata(const u32 addr)
+    std::size_t get_offset_rodata(const u32_t addr)
     {
-        return addr - start_rodata_addr;
+        return addr - rodata_sec.start_addr;
     }
-    std::size_t get_offset_data(const u32 addr)
+    std::size_t get_offset_data(const u32_t addr)
     {
-        return addr - start_data_addr;
+        return addr - data_sec.start_addr;
     }
 
-    u32 get_mapping_index(const u32 addr)
+    u32_t get_mapping_index(const u32_t addr)
     {
-        const u32 offset = get_offset(addr);
-        const u32 instr_offset = offset / 4;
+        const u32_t offset = get_offset(addr);
+        const u32_t instr_offset = offset / 4;
         const bool instr_is_thumb = (offset & 1) == 1;
         if(instr_is_thumb)
         {
             const bool instr_is_second_half_thumb = (offset & 2) == 2;
-            const u32 instr_thumb_offset = (instr_is_second_half_thumb ? 2 : 1);
+            const u32_t instr_thumb_offset = (instr_is_second_half_thumb ? 2 : 1);
             return instr_offset * 3 + instr_thumb_offset;
         }
         else
             return instr_offset * 3;
     }
-    MappingValue& get_mapping(const u32 addr)
+    MappingValue& get_mapping(const u32_t addr)
     {
         const auto mapping_index = get_mapping_index(addr);
         if(mapping_index >= analyzed.size())
@@ -141,7 +143,7 @@ struct ProcessDisasmContext {
         return analyzed[mapping_index];
     }
     struct BranchDestination {
-        u32 addr;
+        u32_t addr;
         bool is_function_start;
         bool is_thumb;
         bool ignore_previous;
@@ -160,7 +162,7 @@ struct ProcessDisasmContext {
     // always sorted like <arm sure> <thumb sure> <arm guess> <thumb guess>
     std::set<BranchDestination> branches{};
     std::vector<BranchDestination> branches_temp_list{};
-    u32 initial_skip_offset{0};
+    u32_t initial_skip_offset{0};
     void add_branch(BranchDestination dest)
     {
         branches_temp_list.push_back(dest);
@@ -194,7 +196,7 @@ struct ProcessDisasmContext {
                 continue;
             }
 
-            auto [it, inserted] = branches.insert(dest);
+            [[maybe_unused]] auto [it, inserted] = branches.insert(dest);
             // printf("INSERT: %d\n", (int)inserted);
         }
         branches_temp_list.clear();
@@ -292,6 +294,14 @@ struct ProcessDisasmContext {
         mapping.failed_guess = true;
         insn_temp_list.clear();
     }
+
+    ProcessDisasmContext(std::span<const u8_t> code_in, std::span<const u8_t> rodata_in, std::span<const u8_t> data_in, u32_t start_addr_in, bool allow_thumb_in)
+        : code_sec(code_in, start_addr_in)
+        , rodata_sec(rodata_in, ALIGN_PAGE_NUM(code_sec.end_addr))
+        , data_sec(data_in, ALIGN_PAGE_NUM(rodata_sec.end_addr))
+        , start_addr(start_addr_in)
+        , allow_thumb(allow_thumb_in)
+    { }
 };
 
 #define INSN_APPEND_LDREX_TYPE(c_ldr_type) \
@@ -541,8 +551,8 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     const bool in_thumb_mode = entry.is_thumb;
     ProcessDisasmContext::State state{
         .handle = in_thumb_mode ? &ctx.handle_thumb.handle : &ctx.handle_arm.handle,
-        .code = ctx.start_code.data() + ctx.get_offset(entry.addr & ~1),
-        .code_size = ctx.start_code.size() - ctx.get_offset(entry.addr & ~1),
+        .code = ctx.code_sec.bytes.data() + ctx.get_offset(entry.addr & ~1),
+        .code_size = ctx.code_sec.bytes.size() - ctx.get_offset(entry.addr & ~1),
         .address = entry.addr & ~1,
         .insn = in_thumb_mode ? ctx.insn_thumb.get() : ctx.insn_arm.get(),
     };
@@ -555,10 +565,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     int64_t last_cmp_imm = 0;
     int last_adr_reg = arm_reg::ARM_REG_INVALID;
     int64_t last_adr_value = 0;
-    u32 last_branch_addr = -1;
+    u32_t last_branch_addr = -1;
     ARMCC_CondCodes last_branch_condcode = ARMCC_AL;
     int last_ldr_offset_for_switch_reg = arm_reg::ARM_REG_INVALID;
-    u32 last_ldr_offset_for_switch_addr = -1;
+    u32_t last_ldr_offset_for_switch_addr = -1;
     int64_t last_ldr_offset_for_switch_max_offset = 0;
     std::string_view last_ldr_offset_for_switch_type;
     bool last_is_uncond_bl = false;
@@ -571,12 +581,12 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         const auto& insn = *state.insn;
         bool uncond_branch = false;
         // contains thumb bit0
-        const u32 active_address = insn.address + (in_thumb_mode ? 1 : 0);
+        const u32_t active_address = insn.address + (in_thumb_mode ? 1 : 0);
         auto& mapping = ctx.get_mapping(active_address);
         const auto arm_mapping = ctx.get_mapping(active_address & ~3u);
 
-        u32 prev_addr_arm = 0;
-        u32 self_value_arm = 0;
+        u32_t prev_addr_arm = 0;
+        u32_t self_value_arm = 0;
         std::optional<ProcessDisasmContext::MappingValue> previous_mapping;
         if(!entry.ignore_previous && active_address == entry.addr)
         {
@@ -592,10 +602,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             {
                 prev_addr_arm = active_address - 4;
             }
-            std::memcpy(&self_value_arm, ctx.start_code.data() + ctx.get_offset(prev_addr_arm + 4), sizeof(u32));
+            std::memcpy(&self_value_arm, ctx.code_sec.bytes.data() + ctx.get_offset(prev_addr_arm + 4), sizeof(u32_t));
         }
 
-        if(prev_addr_arm && prev_addr_arm >= ctx.start_addr && prev_addr_arm < ctx.start_addr + ctx.start_code.size())
+        if(prev_addr_arm && prev_addr_arm >= ctx.start_addr && prev_addr_arm < ctx.start_addr + ctx.code_sec.bytes.size())
         {
             // cond_printf("Checking previous instruction at 0x%08x\n", prev_addr_arm);
             previous_mapping = ctx.get_mapping(prev_addr_arm);
@@ -607,7 +617,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         // aka don't support polyglot code
         /* if(active_address != entry.addr && entry.is_guess && (mapping.is_function_start || arm_mapping.is_function_start))
         {
-            cond_printf("reached a function start from a guess: %08x\n", (u32)insn.address);
+            cond_printf("reached a function start from a guess: %08x\n", (u32_t)insn.address);
             cond_printf("we were in a constant pool. discard.\n");
             iter_success = false;
             mapping.failed_guess = true;
@@ -615,7 +625,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
         else */ if(active_address == entry.addr && entry.is_guess && !entry.is_function_start && previous_mapping && previous_mapping->failed_guess)
         {
-            cond_printf("non-function guess follows a failed guess: %08x\n", (u32)insn.address);
+            cond_printf("non-function guess follows a failed guess: %08x\n", (u32_t)insn.address);
             cond_printf("assume we were in a constant pool. discard.\n");
             iter_success = false;
             mapping.failed_guess = true;
@@ -623,7 +633,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
         else if(active_address == entry.addr && (mapping.visited || arm_mapping.visited))
         {
-            cond_printf("already visited: %08x\n", (u32)(insn.address & ~3u));
+            cond_printf("already visited: %08x\n", (u32_t)(insn.address & ~3u));
             break;
         }
         
@@ -831,10 +841,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         {
         case ARM_INS_B: {
             const uint64_t branch_target = insn.detail->arm.operands[0].imm;
-            if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
+            if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.code_sec.bytes.size())
             {
                 result += std::format("CPU_PERFORM_{}_B(ctx, 0x{:08x});", label_kind, branch_target);
-                ctx.add_branch({(u32)branch_target, false, in_thumb_mode, true, insn.detail->arm.cc});
+                ctx.add_branch({(u32_t)branch_target, false, in_thumb_mode, true, insn.detail->arm.cc});
             }
             // if unconditional, or the opposite of the last conditional branch without a flag setting inbetween, assume return
             if(insn.detail->arm.cc == ARMCC_AL)
@@ -864,7 +874,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             // if(auto it = last_known_reg_value.find((arm_reg)branch_target_reg); it != last_known_reg_value.end() && it->second.second)
             // {
             //     const auto value = it->second.first;
-            //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.start_code.size())
+            //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.code_sec.bytes.size())
             //     {
             //         cond_printf("Identified indirect jump to %08x\n", value);
             //         ctx.add_branch(value);
@@ -880,10 +890,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
         }
         case ARM_INS_BL: {
             const uint64_t branch_target = insn.detail->arm.operands[0].imm;
-            if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
+            if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.code_sec.bytes.size())
             {
                 result += std::format("CPU_PERFORM_{}_BL(ctx, 0x{:08x});", label_kind, branch_target);
-                ctx.add_branch({(u32)branch_target, true, in_thumb_mode, true});
+                ctx.add_branch({(u32_t)branch_target, true, in_thumb_mode, true});
             }
             last_is_uncond_bl = true;
             // last_known_reg_value.clear();
@@ -897,7 +907,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 // if(auto it = last_known_reg_value.find((arm_reg)branch_target_reg); it != last_known_reg_value.end() && it->second.second)
                 // {
                 //     const auto value = it->second.first;
-                //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.start_code.size())
+                //     if (ctx.start_addr <= value && value < ctx.start_addr + ctx.code_sec.bytes.size())
                 //     {
                 //         cond_printf("Identified indirect jump to %08x\n", value);
                 //         ctx.add_branch(value);
@@ -907,10 +917,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             else
             {
                 const uint64_t branch_target = insn.detail->arm.operands[0].imm;
-                if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.start_code.size())
+                if (ctx.start_addr + ctx.initial_skip_offset <= branch_target && branch_target < ctx.start_addr + ctx.code_sec.bytes.size())
                 {
                     result += std::format("CPU_PERFORM_{}_BLX_IMM(ctx, 0x{:08x});", label_kind, branch_target);
-                    ctx.add_branch({(u32)(branch_target), true, !in_thumb_mode, true});
+                    ctx.add_branch({(u32_t)(branch_target), true, !in_thumb_mode, true});
                 }
             }
             if(insn.detail->arm.cc == ARMCC_AL)
@@ -1251,16 +1261,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F64F32, "f64", "f32");
             // to s32
             UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_S32F32, "s32", "f32");
-            // to u32
-            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_U32F32, "u32", "f32");
+            // to u32_t
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_U32F32, "u32_t", "f32");
 
         // from f64
             // to f32
             UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F32F64, "f32", "f64");
             // to s32
             UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_S32F64, "s32", "f64");
-            // to u32
-            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_U32F64, "u32", "f64");
+            // to u32_t
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_U32F64, "u32_t", "f64");
 
         // from s32
             // to f32
@@ -1268,11 +1278,11 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             // to f64
             UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F64S32, "f64", "s32");
 
-        // from u32
+        // from u32_t
             // to f32
-            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F32U32, "f32", "u32");
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F32U32, "f32", "u32_t");
             // to f64
-            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F64U32, "f64", "u32");
+            UTIL_ARM_INS_VCVT_IMPL(ARM_VECTORDATA_F64U32, "f64", "u32_t");
 
             default:
                 cond_printf("vcvt arm_vectordata_type: %d\n", (int)insn.detail->arm.vector_data);
@@ -1323,16 +1333,16 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 {
                     cond_printf("offset switch statement detected: %lld entries\n", last_ldr_offset_for_switch_max_offset);
                     std::vector<int64_t> switch_offsets;
-                    using append_offset_f_t = void(*)(ProcessDisasmContext&, std::vector<int64_t>&, const u32, const int64_t);
-                    append_offset_f_t append_offset = [](ProcessDisasmContext&, std::vector<int64_t>&, const u32, const int64_t) { };
-#define MAKE_APPEND_OFFSET(T) [](ProcessDisasmContext& ctx, std::vector<int64_t>& switch_offsets, const u32 pointer_base, const int64_t index) { \
-        const u32 pointer = pointer_base + index * sizeof(T); \
+                    using append_offset_f_t = void(*)(ProcessDisasmContext&, std::vector<int64_t>&, const u32_t, const int64_t);
+                    append_offset_f_t append_offset = [](ProcessDisasmContext&, std::vector<int64_t>&, const u32_t, const int64_t) { };
+#define MAKE_APPEND_OFFSET(T) [](ProcessDisasmContext& ctx, std::vector<int64_t>& switch_offsets, const u32_t pointer_base, const int64_t index) { \
+        const u32_t pointer = pointer_base + index * sizeof(T); \
         T value = 0; \
         { \
             auto sp = ctx.get_from_pointer(pointer, sizeof(T)); \
             /* cond_printf("offset switch statement entry %lld: vptr %08x ptr %p sz %zd\n", index, pointer, sp.data(), sp.size()); */ \
             std::memcpy(&value, sp.data(), sizeof(T)); \
-            if(pointer < ctx.start_code_addr) \
+            if(pointer < ctx.code_sec.start_addr) \
             { \
                 auto& entry_mapping = ctx.get_mapping(pointer); \
                 entry_mapping.tried = true; \
@@ -1369,9 +1379,9 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                     for(int64_t index = 0; index < last_ldr_offset_for_switch_max_offset; ++index)
                     {
                         const int64_t offset = switch_offsets[index];
-                        const u32 value = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + offset * 4;
+                        const u32_t value = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + offset * 4;
                         cond_printf("Entry %lld (pc off %08llx): 0x%08x\n", index, offset, value);
-                        ctx.add_branch({(u32)(value), false, false, false});
+                        ctx.add_branch({(u32_t)(value), false, false, false});
                     }
                 }
             }
@@ -1379,11 +1389,11 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             {
                 if(auto it = last_known_reg_from_pc_value.find((arm_reg)(insn.detail->arm.operands[0].reg)); it != last_known_reg_from_pc_value.end())
                 {
-                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + it->second;
-                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
+                    const u32_t pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + it->second;
+                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.code_sec.bytes.size())
                     {
                         cond_printf("found 2-step function pointer: 0x%08x (from offset at 0x%08x)\n", pointer, it->second);
-                        ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
+                        ctx.add_guess_branch({(u32_t)(pointer), false, in_thumb_mode, false});
                     }
                     last_known_reg_from_pc_value.erase(it);
                 }
@@ -1393,15 +1403,15 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             {
                 if(insn.id == ARM_INS_ADD)
                 {
-                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
-                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
+                    const u32_t pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
+                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.code_sec.bytes.size())
                     {
                         cond_printf("found ADR (add)! 0x%08x\n", pointer);
                         if(last_adr_reg_used != arm_reg::ARM_REG_INVALID) // if there was an ADR before this one
                         {
                             cond_printf("ADR complete! 0x%08llx\n", last_adr_value);
                             ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
-                            ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
+                            ctx.add_guess_branch({(u32_t)(last_adr_value), false, in_thumb_mode, false});
                         }
                     }
                     last_adr_reg = insn.detail->arm.operands[0].reg;
@@ -1409,15 +1419,15 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 }
                 else if(insn.id == ARM_INS_SUB)
                 {
-                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) - insn.detail->arm.operands[2].imm;
-                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.start_code.size())
+                    const u32_t pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) - insn.detail->arm.operands[2].imm;
+                    if (ctx.start_addr + ctx.initial_skip_offset <= pointer && pointer < ctx.start_addr + ctx.code_sec.bytes.size())
                     {
                         cond_printf("found ADR (sub)! 0x%08x\n", pointer);
                         if(last_adr_reg_used != arm_reg::ARM_REG_INVALID) // if there was an ADR before this one
                         {
                             cond_printf("ADR complete! 0x%08llx\n", last_adr_value);
                             ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
-                            ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
+                            ctx.add_guess_branch({(u32_t)(last_adr_value), false, in_thumb_mode, false});
                         }
                     }
                     last_adr_reg = insn.detail->arm.operands[0].reg;
@@ -1510,9 +1520,9 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
             
             if(insn.detail->arm.operands[1].type == arm_op_type::ARM_OP_REG && insn.detail->arm.operands[1].reg == arm_reg::ARM_REG_PC)
             {
-                const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
+                const u32_t pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + insn.detail->arm.operands[2].imm;
                 cond_printf("found emulated bl! 0x%08x\n", pointer);
-                ctx.add_guess_branch({(u32)(pointer), false, in_thumb_mode, false});
+                ctx.add_guess_branch({(u32_t)(pointer), false, in_thumb_mode, false});
                 last_is_uncond_bl = true;
             }
             break;
@@ -1889,15 +1899,15 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 cond_printf("jump table switch statement detected: %lld entries\n", (last_cmp_imm + last_cmp_imm_offset));
                 for(int64_t index = 0; index < (last_cmp_imm + last_cmp_imm_offset); ++index)
                 {
-                    u32 value = 0;
-                    const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + index * 4;
+                    u32_t value = 0;
+                    const u32_t pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + index * 4;
                     
                     std::memcpy(&value, ctx.get_from_pointer(pointer, 4).data(), 4);
                     cond_printf("Entry %lld (0x%08x): 0x%08x\n", index, pointer, value);
                     auto& entry_mapping = ctx.get_mapping(pointer);
                     entry_mapping.tried = true;
                     entry_mapping.jumptable_entry = true;
-                    ctx.add_branch({(u32)(value), false, false, false});
+                    ctx.add_branch({(u32_t)(value), false, false, false});
                 }
                 last_cmp = 0; // found a switch
             }
@@ -1908,23 +1918,23 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 && insn.detail->arm.operands[1].mem.index == arm_reg::ARM_REG_INVALID
             )
             {
-                u32 value = 0;
+                u32_t value = 0;
                 const int64_t disp = insn.detail->arm.operands[1].subtracted
                     ? -insn.detail->arm.operands[1].mem.disp
                     : insn.detail->arm.operands[1].mem.disp;
-                const u32 pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + disp;
+                const u32_t pointer = (active_address & ~1) + (in_thumb_mode ? 4 : 8) + disp;
                 std::memcpy(&value, ctx.get_from_pointer(pointer, 4).data(), 4);
                 cond_printf("register set detected: from pc[%lld:+4] == %08x @ %08x\n", disp, value, pointer);
                 last_known_reg_from_pc_value[(arm_reg)insn.detail->arm.operands[0].reg] = value;
                 // HACK: if the set value looks like a pointer to code, add it to the queue
-                if (ctx.start_addr + ctx.initial_skip_offset <= value && value < ctx.start_addr + ctx.start_code.size())
+                if (ctx.start_addr + ctx.initial_skip_offset <= value && value < ctx.start_addr + ctx.code_sec.bytes.size())
                 {
                     ctx.get_mapping(value).has_adr_start = value;
                     if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
                     {
                         cond_printf("Maybe identified function pointer to %08x\n", value);
-                        // would need to check LR being set before to be suire about is_function_start
-                        ctx.add_guess_branch({(u32)(value), false, false, false});
+                        // would need to check LR being set before to be sure about is_function_start
+                        ctx.add_guess_branch({(u32_t)(value), false, false, false});
                     }
                 }
             }
@@ -2098,11 +2108,11 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
 
         if(last_adr_reg_used != arm_reg::ARM_REG_INVALID && last_adr_reg == arm_reg::ARM_REG_INVALID)
         {
-            if (ctx.start_addr + ctx.initial_skip_offset <= (u32)last_adr_value && (u32)last_adr_value < ctx.start_addr + ctx.start_code.size())
+            if (ctx.start_addr + ctx.initial_skip_offset <= (u32_t)last_adr_value && (u32_t)last_adr_value < ctx.start_addr + ctx.code_sec.bytes.size())
             {
                 cond_printf("ADR complete: 0x%08llx\n", last_adr_value);
                 ctx.get_mapping(last_adr_value).has_adr_start = last_adr_value;
-                ctx.add_guess_branch({(u32)(last_adr_value), false, in_thumb_mode, false});
+                ctx.add_guess_branch({(u32_t)(last_adr_value), false, in_thumb_mode, false});
             }
             last_adr_reg = arm_reg::ARM_REG_INVALID;
         }
@@ -2138,24 +2148,10 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     }
 }
 
-#define ALIGN_TO_NUM(n, a) (((n) + ((a) - 1u)) & -(a))
-#define ALIGN_PAGE_NUM(n) ALIGN_TO_NUM(n, 0x1000u)
-static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save, const char* const* extra_args)
+static void disasm_all_branches_from(const u32_t start_addr, std::span<const u8_t> code, std::span<const u8_t> rodata, std::span<const u8_t> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save, const char* const* extra_args)
 {
     const bool aggregate_labels = extra_args[0] != nullptr;
-    ProcessDisasmContext ctx{
-        .start_addr = start_addr,
-        .start_code_addr = start_addr,
-        .start_code = start_code,
-        .end_code_addr = (u32)(start_addr + start_code.size()),
-        .start_rodata_addr = (u32)(ALIGN_PAGE_NUM(start_addr + start_code.size())),
-        .start_rodata = rodata,
-        .end_rodata_addr = (u32)(ALIGN_PAGE_NUM(start_addr + start_code.size()) + rodata.size()),
-        .start_data_addr = (u32)(ALIGN_PAGE_NUM(ALIGN_PAGE_NUM(start_addr + start_code.size()) + rodata.size())),
-        .start_data = data,
-        .end_data_addr = (u32)(ALIGN_PAGE_NUM(ALIGN_PAGE_NUM(start_addr + start_code.size()) + rodata.size()) + data.size()),
-        .allow_thumb = allow_thumb
-    };
+    ProcessDisasmContext ctx(code, rodata, data, start_addr, allow_thumb);
 
     cond_printf("Checking initial pointer: %08x\n", start_addr);
     ctx.add_branch({start_addr, false, false, true});
@@ -2169,12 +2165,12 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         disasm_chunk(ctx, *dest);
     } while(!ctx.branches.empty());
 
-    for(std::size_t i = 0; i < rodata.size(); i += sizeof(u32))
+    for(std::size_t i = 0; i < rodata.size(); i += sizeof(u32_t))
     {
-        const u32 analyzed_addr = ctx.start_rodata_addr + i;
-        u32 value = 0;
+        const u32_t analyzed_addr = ctx.rodata_sec.start_addr + i;
+        u32_t value = 0;
         std::memcpy(&value, &rodata[i], 4);
-        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + code.size())
         {
             if((value & 2) && !(value & 1)) // misaligned arm
                 continue;
@@ -2184,12 +2180,12 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         }
     }
 
-    for(std::size_t i = 0; i < data.size(); i += sizeof(u32))
+    for(std::size_t i = 0; i < data.size(); i += sizeof(u32_t))
     {
-        const u32 analyzed_addr = ctx.start_data_addr + i;
-        u32 value = 0;
-        std::memcpy(&value, &data[i], sizeof(u32));
-        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
+        const u32_t analyzed_addr = ctx.data_sec.start_addr + i;
+        u32_t value = 0;
+        std::memcpy(&value, &data[i], sizeof(u32_t));
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + code.size())
         {
             if((value & 2) && !(value & 1)) // misaligned arm
                 continue;
@@ -2199,18 +2195,18 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
         }
     }
 
-    for(u32 i = 0; i < start_code.size() / 4; ++i)
+    for(u32_t i = 0; i < code.size() / 4; ++i)
     {
         if(ctx.analyzed[i * 3].visited || ctx.analyzed[i * 3].tried)
             continue;
 
-        const u32 analyzed_addr = ctx.start_code_addr + i * 4;
-        u32 value = 0;
-        std::memcpy(&value, &start_code[i * 4], sizeof(u32));
+        const u32_t analyzed_addr = ctx.code_sec.start_addr + i * 4;
+        u32_t value = 0;
+        std::memcpy(&value, &code[i * 4], sizeof(u32_t));
         if(value == 0)
             continue;
 
-        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + code.size())
         {
             if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
             {
@@ -2219,7 +2215,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             }
         }
         value += analyzed_addr;
-        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + start_code.size())
+        if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + code.size())
         {
             if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
             {
@@ -2241,7 +2237,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     bool had_branches = true;
     while(had_branches)
     {
-        for(u32 i = 0; i < start_code.size() / 4; ++i)
+        for(u32_t i = 0; i < code.size() / 4; ++i)
         {
             auto& current_mapping = ctx.analyzed[i * 3];
             if(current_mapping.visited || current_mapping.tried)
@@ -2250,18 +2246,18 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             if(!current_mapping.has_adr_start)
                 continue;
 
-            const u32 analyzed_addr = start_addr + i * 4;
+            const u32_t analyzed_addr = start_addr + i * 4;
             // printf("Doing an ADR-based array starting at 0x%08x (current 0x%08x)\n", current_mapping.has_adr_start, analyzed_addr);
 
-            u32 value = 0;
-            std::memcpy(&value, &start_code[i * 4], sizeof(u32));
+            u32_t value = 0;
+            std::memcpy(&value, &code[i * 4], sizeof(u32_t));
             value += current_mapping.has_adr_start;
-            if(ctx.start_addr + ctx.initial_skip_offset <= value && value < ctx.start_addr + ctx.start_code.size())
+            if(start_addr + ctx.initial_skip_offset <= value && value < start_addr + code.size())
             {
                 if(!((value & 2) == 2 && (value & 1) == 0)) // not misaligned arm
                 {
                     cond_printf("Checking text array pointer with base %08x (%08x): %08x\n", current_mapping.has_adr_start, analyzed_addr, value);
-                    if((i + 1) < (start_code.size() / 4))
+                    if((i + 1) < (code.size() / 4))
                     {
                         auto& next_mapping = ctx.analyzed[(i + 1) * 3];
                         if(!next_mapping.has_adr_start)
@@ -2286,9 +2282,9 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     }
 
 
-    u32 unvisited_start = 0;
+    u32_t unvisited_start = 0;
     bool unvisited_ongoing = false;
-    for(u32 i = 0; i < start_code.size() / 4; ++i)
+    for(u32_t i = 0; i < code.size() / 4; ++i)
     {
         if(ctx.analyzed[i * 3].visited)
         {
@@ -2312,7 +2308,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     if(unvisited_ongoing)
     {
         unvisited_ongoing = false;
-        cond_printf("unvisited: %08x - %08x (length %08x)", unvisited_start, ctx.end_code_addr, (u32)(ctx.end_code_addr - unvisited_start));
+        cond_printf("unvisited: %08x - %08x (length %08x)", unvisited_start, ctx.code_sec.end_addr, (u32_t)(ctx.code_sec.end_addr - unvisited_start));
         cond_printf("\n");
     }
 
@@ -2323,7 +2319,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     }
 #endif
 
-    for(u32 i = 0; i < start_code.size() / 4; ++i)
+    for(u32_t i = 0; i < code.size() / 4; ++i)
     {
         if(ctx.analyzed[i * 3 + 1].visited)
         {
@@ -2506,7 +2502,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     safe_fprintf(source_file, "}\n");
 }
 
-static std::vector<u8> load_data(const std::string& path, const size_t align_to_n=0x1000)
+static std::vector<u8_t> load_data(const std::string& path, const size_t align_to_n=0x1000u)
 {
     FILE_ptr fh_ptr{fopen(path.c_str(), "rb")};
     if(!fh_ptr) return {};
@@ -2517,10 +2513,12 @@ static std::vector<u8> load_data(const std::string& path, const size_t align_to_
     if(fhsz <= 0l) return {};
 
     fseek(fh, 0, SEEK_SET);
-    std::vector<u8> data(fhsz);
+    std::vector<u8_t> data(fhsz);
     if(fread(data.data(), 1, data.size(), fh) != (size_t)fhsz) return {};
 
+    // ensure consistent behaviour whether or not the file was zero-padded to be page-aligned
     data.resize(ALIGN_TO_NUM(data.size(), align_to_n));
+
     return data;
 }
 
@@ -2534,10 +2532,10 @@ int main(int argc, char** argv)
 
     // printf("Hello, world!\n");
 
-    auto seg_code = load_data(argv[1]);
-    auto seg_rodata = load_data(argv[2]);
-    auto seg_data = load_data(argv[3]);
+    auto sec_code = load_data(argv[1]);
+    auto sec_rodata = load_data(argv[2]);
+    auto sec_data = load_data(argv[3]);
 
     // abuse that argv[argc] is a valid access (gives NULL) by spec so that 5 or more args works
-    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, false, &argv[5]);
+    disasm_all_branches_from(0x0010'0000u, sec_code, sec_rodata, sec_data, argv[4], false, false, &argv[5]);
 }
