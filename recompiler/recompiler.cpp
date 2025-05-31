@@ -1,6 +1,8 @@
 #include <embed_ctx.h>
 
 extern "C" {
+#include <arm_cpu_ctx.h>
+
 #include <capstone/platform.h>
 #include <capstone/capstone.h>
 }
@@ -19,8 +21,9 @@ extern "C" {
 #include <format>
 #include <algorithm>
 
-#define safe_fprintf(ptr, ...) do { if(ptr) fprintf(ptr, __VA_ARGS__); } while(0)
-#define safe_fwrite(a, b, c, ptr) do { if(ptr) fwrite(a, b, c, ptr); } while(0)
+#define safe_fprintf(fh, ...) do { if(fh) fprintf(fh, __VA_ARGS__); } while(0)
+#define safe_fwrite(buf, elem_size, elem_count, fh) do { const auto fh_ = (fh); const auto buf_ = (buf); \
+    if(fh_ && buf_) fwrite(buf_, elem_size, elem_count, fh_); } while(0)
 #define cond_printf(...) do { if(!ctx.suppress_print) printf(__VA_ARGS__); } while(0)
 using u32 = std::uint32_t;
 using u8 = std::uint8_t;
@@ -2346,6 +2349,7 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     // auto labels_thumb_file = labels_thumb_file_ptr.get();
 
     safe_fwrite(g_embedded_ctx_header, g_embedded_ctx_header_size, 1, source_file);
+    safe_fwrite(g_embedded_utils_header + UTILS_HEADER_INCLUDE_LENGTH, g_embedded_ctx_header_size - UTILS_HEADER_INCLUDE_LENGTH, 1, source_file);
     safe_fprintf(source_file, "\nvoid ATTR_ENTRY_CALLCONV ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
 
     safe_fprintf(source_file, "goto LAB_init;\n");
