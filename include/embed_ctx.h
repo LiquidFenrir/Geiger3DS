@@ -20,13 +20,13 @@ extern const unsigned long long g_embedded_utils_header_size;
 
 const char g_embedded_ctx_header[] = {
 #embed "arm_cpu_ctx.h" suffix(,)
-'\0' // null terminator
+'\0' // nul terminator
 };
 const unsigned long long g_embedded_ctx_header_size = sizeof(g_embedded_ctx_header) - 1;
 
 const char g_embedded_utils_header[] = {
 #embed "arm_cpu_utils.h" suffix(,)
-'\0' // null terminator
+'\0' // nul terminator
 };
 const unsigned long long g_embedded_utils_header_size = sizeof(g_embedded_utils_header) - 1;
 

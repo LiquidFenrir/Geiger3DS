@@ -2140,7 +2140,7 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
 
 #define ALIGN_TO_NUM(n, a) (((n) + ((a) - 1u)) & -(a))
 #define ALIGN_PAGE_NUM(n) ALIGN_TO_NUM(n, 0x1000u)
-static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save, const char** extra_args)
+static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save, const char* const* extra_args)
 {
     const bool aggregate_labels = extra_args[0] != nullptr;
     ProcessDisasmContext ctx{
