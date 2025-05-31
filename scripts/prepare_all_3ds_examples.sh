@@ -1,10 +1,16 @@
 #!/bin/bash
 
-cd ./3ds-examples
+set -e
+if [ "$#" -ne 1 ]; then
+    echo "Illegal number of parameters" && false
+fi
+
+cd "$1"
+mkdir -p bin
 make -j4
 
 # copy every elf to the bin folder next to its related 3dsx
-find . -name \*.elf -exec cp {} ./bin/ ';'
+find . -path ./bin -prune -o -name \*.elf -type f -exec cp {} ./bin/ ';'
 
 cd ./bin
 

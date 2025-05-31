@@ -18,6 +18,7 @@ typedef int64_t s64_t;
 #define ATTR_FORCE_INLINE __attribute__((__always_inline__))
 #define ATTR_NORETURN __attribute__((__noreturn__))
 #define ATTR_CALLCONV __attribute__((__sysv_abi__))
+#define ATTR_ENTRY_CALLCONV __attribute__((__ms_abi__))
 #define ATTR_NO_SAVE_REGS __attribute__((__no_callee_saved_registers__))
 
 #define ATTR_FUNC_BASE ATTR_FORCE_INLINE ATTR_CALLCONV
@@ -29,8 +30,32 @@ typedef int64_t s64_t;
 #define CPU_PC_ADVANCE_ARM (4)
 #define CPU_PC_AHEAD_ARM ((CPU_PC_ADVANCE_ARM) * 2)
 
-#define DEFINE_LABEL(kind, addr) LAB_##kind##_##addr:
-// #define SETUP_LABEL(addr, base_addr, entry_name, label_kind) bank->labels[(addr - base_addr) / 4].entry_name = &&LAB_##label_kind##_##addr
+#define IND(X) X
+#define STR(X) #X
+#define STRM(X) STR(X)
+
+#define LABN(kind,addr) L_##kind##_##addr
+#define LABNI(kind,addr) LABN(kind,addr)
+
+#define LABDP(name,prev) \
+name: \
+do { \
+    __asm__ goto ("" \
+    ".globl " STR(name) \
+    "\n" STR(name) ":" \
+    : : : "memory" : name, prev); \
+} while(0);
+
+#define LABP(kind,addr,prev) LABDP(LABN(kind,addr),LABN(kind,prev))
+
+#define LABD(name) \
+    name: \
+    __asm__ goto ("" \
+        ".globl " STR(name) \
+        "\n" STR(name) ":" \
+    : : : "memory" : name);
+
+#define LAB(kind,addr) LABD(LABN(kind,addr))
 
 typedef enum arm_cpu_cc {
   arm_cpu_cc_eq = 0, // Equal
@@ -265,6 +290,26 @@ typedef struct arm_cpu_ctx {
 #define ARGEXTRACT_DO(...) ARGEXTRACT_DO_(__VA_ARGS__)
 #define ARGEXTRACT_DO_(...) __VA_ARGS__##_END
 
+#define ARGEXTRACT_GOTO_ALL_A(...) ARGEXTRACT_GOTO_ALL_A_LOOP_BODY(__VA_ARGS__,) ARGEXTRACT_GOTO_ALL_A_LOOP_B
+#define ARGEXTRACT_GOTO_ALL_A_LOOP_B(...) ARGEXTRACT_GOTO_ALL_A_LOOP_BODY(__VA_ARGS__,0) ARGEXTRACT_GOTO_ALL_A_LOOP_C
+#define ARGEXTRACT_GOTO_ALL_A_LOOP_C(...) ARGEXTRACT_GOTO_ALL_A_LOOP_BODY(__VA_ARGS__,0) ARGEXTRACT_GOTO_ALL_A_LOOP_B
+#define ARGEXTRACT_GOTO_ALL_A_END
+#define ARGEXTRACT_GOTO_ALL_A_LOOP_B_END
+#define ARGEXTRACT_GOTO_ALL_A_LOOP_C_END
+
+#define ARGEXTRACT_GOTO_ALL_T(...) ARGEXTRACT_GOTO_ALL_T_LOOP_BODY(__VA_ARGS__,) ARGEXTRACT_GOTO_ALL_T_LOOP_B
+#define ARGEXTRACT_GOTO_ALL_T_LOOP_B(...) ARGEXTRACT_GOTO_ALL_T_LOOP_BODY(__VA_ARGS__,0) ARGEXTRACT_GOTO_ALL_T_LOOP_C
+#define ARGEXTRACT_GOTO_ALL_T_LOOP_C(...) ARGEXTRACT_GOTO_ALL_T_LOOP_BODY(__VA_ARGS__,0) ARGEXTRACT_GOTO_ALL_T_LOOP_B
+#define ARGEXTRACT_GOTO_ALL_T_END
+#define ARGEXTRACT_GOTO_ALL_T_LOOP_B_END
+#define ARGEXTRACT_GOTO_ALL_T_LOOP_C_END
+
+#define ARGEXTRACT_GOTO_ALL_A_LOOP_BODY(lab_name, ...) __asm__ goto ("" : : : : LABNI(A,lab_name) );
+#define ARGEXTRACT_GOTO_ALL_T_LOOP_BODY(lab_name, ...) __asm__ goto ("" : : : : LABNI(T,lab_name) );
+
+#define INIT_GOTO_ALL(kind,labs) ARGEXTRACT_DO(ARGEXTRACT_GOTO_ALL_##kind (error)(start)labs)
+#define INIT_GOTO_START(lab) __asm__ goto ("" : : : : IND(lab));
+
 #if 0
 static inline void ATTR_FUNC_BASE util_get_mxcsr(u32_t* const into)
 {
@@ -277,9 +322,9 @@ static inline void ATTR_FUNC_BASE util_set_mxcsr(const u32_t* const from)
 #else
 static inline void ATTR_FUNC_BASE util_get_mxcsr(u32_t* const into)
 {
-    __asm__ __volatile__ ("stmxcsr %rdi"
+    __asm__ __volatile__ ("stmxcsr %0"
         : "=m"(*into)
-        : "rD"(into)
+        : /* No inputs, "r"(into) is 'register' and not '[register]' needed for memory */
         : /* No clobbers */
     );
 }
@@ -287,7 +332,7 @@ static inline void ATTR_FUNC_BASE util_set_mxcsr(const u32_t* const from)
 {
     __asm__ __volatile__ ("ldmxcsr %0"
         : /* No outputs */
-        : "rD"(from), "m"(*from)
+        : "m"(*from)
         : "cc"
     );
 }
@@ -555,10 +600,10 @@ static inline void ATTR_FUNC_BASE arm_cpu_instr_svc(CPU_CTX_DEFINE(ctx), const u
 }
 static inline void ATTR_NORETURN ATTR_FUNC_BASE arm_cpu_instr_branch_to_addr(CPU_CTX_DEFINE(ctx), const u32_t addr)
 {
-    asm goto (
-        "jmp %rdi"
+    __asm__ goto (
+        "jmp %0"
         : /* No outputs. */
-        : "rD" (ctx->indirect_brancher), "rS"(addr)
+        : "r" (ctx->indirect_brancher), "S"(addr)
         : /* No clobbers. */
         : /* No (local) labels */ after_jump
     );
@@ -742,11 +787,11 @@ static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_ror_REG(CPU_CTX_DEFINE(ctx), cons
 }
 
 #define CPU_PERFORM_ARM_B(ctx, target) do { \
-    goto LAB_ARM_##target; \
+    goto LABN(A,target); \
 } while(0)
 
 #define CPU_PERFORM_THUMB_B(ctx, target) do { \
-    goto LAB_THUMB_##target; \
+    goto LABN(T,target); \
 } while(0)
 
 #define CPU_PERFORM_BRANCH_REG(ctx, value_in) do { \
@@ -762,21 +807,21 @@ static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_ror_REG(CPU_CTX_DEFINE(ctx), cons
 
 #define CPU_PERFORM_ARM_BL(ctx, target) do { \
     ctx->lr = ctx->pc - (CPU_PC_ADVANCE_ARM); \
-    goto LAB_ARM_##target; \
+    goto LABN(A,target); \
 } while(0)
 #define CPU_PERFORM_ARM_BLX_IMM(ctx, target) do { \
     ctx->lr = ctx->pc - (CPU_PC_ADVANCE_ARM); \
     CPU_STATUS_T_SET(ctx, 1); \
-    goto LAB_THUMB_##target; \
+    goto LABN(T,target); \
 } while(0)
 #define CPU_PERFORM_THUMB_BL(ctx, target) do { \
     ctx->lr = (ctx->pc - (CPU_PC_ADVANCE_THUMB)) | 1; \
-    goto LAB_THUMB_##target; \
+    goto LABN(T,target); \
 } while(0)
 #define CPU_PERFORM_THUMB_BLX_IMM(ctx, target) do { \
     ctx->lr = (ctx->pc - (CPU_PC_ADVANCE_THUMB)) | 1; \
     CPU_STATUS_T_SET(ctx, 0); \
-    goto LAB_ARM_##target; \
+    goto LABN(A,target); \
 } while(0)
 
 #define CPU_PERFORM_BLX_REG(ctx, reg) do { \
@@ -1223,7 +1268,7 @@ static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_clz(CPU_CTX_DEFINE(ctx), const u3
     CPU_PERFORM_SIMD_16_TYPE_ALL(ctx, base_type, 16, 0, opLo, opHi, destination, argA, argB)
 
 #define CPU_PERFORM_MCR(ctx, source, coproc_id, opcodeA, opcodeB, coproc_regA, coproc_regB) do { \
-    if(coproc_id != 15) goto LAB_ARM_error; \
+    if(coproc_id != 15) goto LABN(A,error); \
     if(opcodeA == 0 && opcodeB == 2 && coproc_regA == 13 && coproc_regB == 0) \
         ctx->cp15.thread_uprw = source; \
     else if(opcodeA == 0 && opcodeB == 4 && coproc_regA == 7 && coproc_regB == 5) \
@@ -1232,16 +1277,16 @@ static inline u32_t ATTR_FUNC_BASE CPU_PERFORM_clz(CPU_CTX_DEFINE(ctx), const u3
         /* data sync barrier */; \
     else if(opcodeA == 0 && opcodeB == 5 && coproc_regA == 7 && coproc_regB == 10) \
         /* data memory barrier */; \
-    else goto LAB_ARM_error; \
+    else goto LABN(A,error); \
 } while(0)
 
 #define CPU_PERFORM_MRC(ctx, source, coproc_id, opcodeA, opcodeB, coproc_regA, coproc_regB) do { \
-    if(coproc_id != 15) goto LAB_ARM_error; \
+    if(coproc_id != 15) goto LABN(A,error); \
     if(opcodeA == 0 && opcodeB == 2 && coproc_regA == 13 && coproc_regB == 0) \
         source = ctx->cp15.thread_uprw; \
     if(opcodeA == 0 && opcodeB == 3 && coproc_regA == 13 && coproc_regB == 0) \
         source = ctx->cp15.thread_upro; \
-    else goto LAB_ARM_error; \
+    else goto LABN(A,error); \
 } while(0)
 
 #define FPU_PERFORM_VMUL_ALL(ctx, float_type, bank_size, sum_preop, mul_postop, dest_bank_index, dest_bank_offset, lhs_bank_index, lhs_bank_offset, rhs_bank_index, rhs_bank_offset) do { \

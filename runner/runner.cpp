@@ -762,7 +762,7 @@ void MyKernelThingy::VirtualCore::core_thread_func(std::stop_token token)
             printf("svc (int 3) detected for core %d\n", vcpu_id);
 
             // Display the contents of the registers set by the code sequence.
-            WHV_REGISTER_NAME names[] = {WHvX64RegisterRdx};
+            WHV_REGISTER_NAME names[] = {WHvX64RegisterRdi};
             WHV_REGISTER_VALUE values[std::size(names)] = {};
             THROW_IF_FAILED(vcpu.GetRegisters(names, std::size(names), values));
 

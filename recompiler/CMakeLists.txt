@@ -12,7 +12,7 @@ target_compile_options(recompiler PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-fexceptions -frtti>
 )
 target_link_libraries(recompiler PRIVATE -static
-    arm-context # cpu struct
+    arm-context # cpu struct headers
     capstone # disassembler library
 )
 target_sources(recompiler PRIVATE

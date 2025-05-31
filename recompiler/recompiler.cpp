@@ -1,9 +1,9 @@
+#include <embed_ctx.h>
+
 extern "C" {
 #include <capstone/platform.h>
 #include <capstone/capstone.h>
 }
-
-#include <embed_ctx.h>
 
 #include <cstdio>
 #include <cstring>
@@ -703,7 +703,6 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
                 cond_printf("First instruction condition is nonsense\n");
                 invalid_function_start = true;
             }
-
             if(invalid_function_start)
             {
                 cond_printf("function start detection failed, skip chunk\n");
@@ -2136,9 +2135,11 @@ static void disasm_chunk(ProcessDisasmContext& ctx, const ProcessDisasmContext::
     }
 }
 
-#define ALIGN_PAGE_NUM(n) (((n) + (0x1000u - 1u)) & -0x1000u)
-static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save)
+#define ALIGN_TO_NUM(n, a) (((n) + ((a) - 1u)) & -(a))
+#define ALIGN_PAGE_NUM(n) ALIGN_TO_NUM(n, 0x1000u)
+static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> start_code, std::span<const u8> rodata, std::span<const u8> data, const std::string& filename, const bool allow_thumb, const bool do_dummy_save, const char** extra_args)
 {
+    const bool aggregate_labels = extra_args[0] != nullptr;
     ProcessDisasmContext ctx{
         .start_addr = start_addr,
         .start_code_addr = start_addr,
@@ -2344,38 +2345,21 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
     // auto labels_arm_file = labels_arm_file_ptr.get();
     // auto labels_thumb_file = labels_thumb_file_ptr.get();
 
-    safe_fprintf(source_file, "void ATTR_CALLCONV ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
+    safe_fwrite(g_embedded_ctx_header, g_embedded_ctx_header_size, 1, source_file);
+    safe_fprintf(source_file, "\nvoid ATTR_ENTRY_CALLCONV ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
 
-    /*
-    safe_fprintf(source_file, "{\n");
-    safe_fprintf(source_file, "arm_code_bank* bank = NULL;\n");
-    safe_fprintf(source_file, "for(bank = ctx->code_banks; bank && !(bank->start_addr <= ctx->pc && ctx->pc < bank->end_addr); bank = bank->next_bank);\n");
-    safe_fprintf(source_file, "#include \"%s.lab.arm.c\"\n", filename.c_str());
-    safe_fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
-    safe_fprintf(source_file, "}\n");
-    safe_fprintf(source_file, "arm_cpu_instr_entry_setup_done(ctx);\n"); // will go back to the action if CRO, otherwise continue to start the program
-    safe_fprintf(source_file, "CPU_PERFORM_BX(ctx, ctx->pc);\n");
-    */
+    safe_fprintf(source_file, "goto LAB_init;\n");
 
-    safe_fprintf(source_file, "LAB_ARM_error:\n");
-    safe_fprintf(source_file, "LAB_THUMB_error:\n");
+    safe_fprintf(source_file, "LABN(A,error):\n");
+    safe_fprintf(source_file, "LABN(T,error):\n");
     safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx);\n");
 
-    /*
-    safe_fprintf(source_file, "static const int LABELS_ARM_TABLE[] __attribute__((section(\".rdata\")))  = {\n");
-    safe_fprintf(source_file, "#include \"%s.lab.arm.c\"\n", filename.c_str());
-    safe_fprintf(source_file, "};\n");
-
-    safe_fprintf(source_file, "static const int LABELS_THUMB_TABLE[] __attribute__((section(\".rdata\"))) = {\n");
-    safe_fprintf(source_file, "#include \"%s.lab.thumb.c\"\n", filename.c_str());
-    safe_fprintf(source_file, "};\n");
-    */
-
-    safe_fprintf(source_file, "LAB_ARM_start:\n");
-    safe_fprintf(source_file, "LAB_THUMB_start:\n");
+    safe_fprintf(source_file, "LABN(A,start):\n");
+    safe_fprintf(source_file, "LABN(T,start):\n");
 
     const char* label_kind = "ARM";
     uint64_t insn_addr_previous = start_addr - 4;
+    uint64_t insn_addr_previous_printed = 0;
     for(const auto& [insn_address, insn_text] : ctx.insn_list)
     {
         if((insn_address & 0x3) != 0)
@@ -2387,20 +2371,57 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             {
                 cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
-            // safe_fprintf(labels_arm_file, "&&LAB_%s_error - &&LAB_%s_start,\n", label_kind, label_kind);
         }
 
-        // safe_fprintf(labels_arm_file, "&&LAB_%s_0x%08llx - &&LAB_%s_start,\n", label_kind, insn_address, label_kind);
-        // safe_fprintf(labels_arm_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entry_arm = &&LAB_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, label_kind, insn_address);
-        // safe_fprintf(labels_arm_file, "SETUP_LABEL(0x%08llx, 0x%08llx, entry_arm, %s);\n", insn_address, (uint64_t)start_addr, label_kind);
-        safe_fprintf(source_file, "LAB_%s_0x%08llx:\n", label_kind, insn_address);
+        if(insn_addr_previous_printed == 0)
+        {
+            if(aggregate_labels)
+            {
+                safe_fprintf(source_file, "\nLAB(A,0x%08llx)\n", insn_address);
+                safe_fprintf(source_file, "\n#define ALL_LAB_A_%08llx (0x%08llx)\n", insn_address, insn_address);
+            }
+            else
+            {
+                safe_fprintf(source_file, "\nLABP(A,0x%08llx,start)\n", insn_address);
+            }
+        }
+        else
+        {
+            if(aggregate_labels)
+            {
+                safe_fprintf(source_file, "\nLAB(A,0x%08llx)\n", insn_address);
+                safe_fprintf(source_file, "\n#define ALL_LAB_A_%08llx (0x%08llx)ALL_LAB_A_%08llx\n", insn_address, insn_address, insn_addr_previous_printed);
+            }
+            else
+            {
+                // references the previous label to prevent optimizing out
+                safe_fprintf(source_file, "\nLABP(A,0x%08llx,0x%08llx)\n", insn_address, insn_addr_previous_printed);
+            }
+        }
+
+        insn_addr_previous_printed = insn_address;
         safe_fwrite(insn_text.data(), 1, insn_text.size(), source_file);
-        safe_fprintf(source_file, "\n");
+    }
+
+    if(insn_addr_previous_printed == 0)
+    {
+        if(aggregate_labels)
+            safe_fprintf(source_file, "\n#define ALL_LAB_A\n");
+        else
+            safe_fprintf(source_file, "\n#define START_LAB_ARM LABN(A,start)\n");
+    }
+    else
+    {
+        if(aggregate_labels)
+            safe_fprintf(source_file, "\n#define ALL_LAB_A ALL_LAB_A_%08llx\n", insn_addr_previous_printed);
+        else
+            safe_fprintf(source_file, "\n#define START_LAB_ARM LABN(A,0x%08llx)\n", insn_addr_previous_printed);
     }
 
     label_kind = "THUMB";
 
     insn_addr_previous = start_addr - 2;
+    insn_addr_previous_printed = 0;
     for(const auto& [insn_address, insn_text] : ctx.insn_list)
     {
         if((insn_address & 0x1) != 1)
@@ -2413,23 +2434,75 @@ static void disasm_all_branches_from(const u32 start_addr, std::span<const u8> s
             {
                 cond_printf("%s @ 0x%08llx visited but no code\n", label_kind, insn_addr_previous);
             }
-            // safe_fprintf(labels_thumb_file, "&&LAB_%s_error - &&LAB_%s_start,\n", label_kind, label_kind);
         }
 
-        // safe_fprintf(labels_thumb_file, "&&LAB_%s_0x%08llx - &&LAB_%s_start,\n", label_kind, active_address, label_kind);
-        // safe_fprintf(labels_thumb_file, "bank->labels[(0x%08llx - 0x%08llx) / 4].entries_thumb[(0x%08llx & 2) >> 1] = &&LAB_%s_0x%08llx,\n", insn_address, (uint64_t)start_addr, insn_address, label_kind, insn_address);
-        // safe_fprintf(labels_thumb_file, "SETUP_LABEL(0x%08llx, 0x%08llx, entries_thumb[%lld], %s);\n", insn_address, (uint64_t)start_addr, ((insn_address & 2) >> 1), label_kind);
+        if(insn_addr_previous_printed == 0)
+        {
+            if(aggregate_labels)
+            {
+                safe_fprintf(source_file, "\nLAB(T,0x%08llx)\n", insn_address);
+                safe_fprintf(source_file, "\n#define ALL_LAB_T_%08llx (0x%08llx)\n", insn_address, insn_address);
+            }
+            else
+            {
+                safe_fprintf(source_file, "\nLABP(T,0x%08llx,start)\n", insn_address);
+            }
+        }
+        else
+        {
+            if(aggregate_labels)
+            {
+                safe_fprintf(source_file, "\nLAB(T,0x%08llx)\n", insn_address);
+                safe_fprintf(source_file, "\n#define ALL_LAB_T_%08llx (0x%08llx)ALL_LAB_T_%08llx\n", insn_address, insn_address, insn_addr_previous_printed);
+            }
+            else
+            {
+                // references the previous label to prevent optimizing out
+                safe_fprintf(source_file, "\nLABP(T,0x%08llx,0x%08llx)\n", insn_address, insn_addr_previous_printed);
+            }
+        }
 
-        safe_fprintf(source_file, "LAB_%s_0x%08llx:\n", label_kind, active_address);
-        fwrite(insn_text.data(), 1, insn_text.size(), source_file);
-        safe_fprintf(source_file, "\n");
+        insn_addr_previous_printed = insn_address;
+        safe_fwrite(insn_text.data(), 1, insn_text.size(), source_file);
     }
 
-    safe_fprintf(source_file, "arm_cpu_instr_runtime_error(ctx); /* should never get there */\n");
+    if(insn_addr_previous_printed == 0)
+    {
+        if(aggregate_labels)
+            safe_fprintf(source_file, "\n#define ALL_LAB_T\n");
+        else
+            safe_fprintf(source_file, "\n#define START_LAB_THUMB LABN(T,start)\n");
+    }
+    else
+    {
+        if(aggregate_labels)
+            safe_fprintf(source_file, "\n#define ALL_LAB_T ALL_LAB_T_%08llx\n", insn_addr_previous_printed);
+        else
+            safe_fprintf(source_file, "\n#define START_LAB_THUMB LABN(T,0x%08llx)\n", insn_addr_previous_printed);
+    }
+
+    safe_fprintf(source_file, "\narm_cpu_instr_runtime_error(ctx); /* should never get there */\n");
+    
+    safe_fprintf(source_file, "LAB_init:\n");
+
+    if(aggregate_labels)
+    {
+        safe_fprintf(source_file, "INIT_GOTO_ALL(A,ALL_LABS_ARM);\n");
+        safe_fprintf(source_file, "INIT_GOTO_ALL(T,ALL_LABS_THUMB);\n");
+    }
+    else
+    {
+        safe_fprintf(source_file, "INIT_GOTO_START(START_LAB_ARM);\n");
+        safe_fprintf(source_file, "INIT_GOTO_START(START_LAB_THUMB);\n");
+    }
+
+    safe_fprintf(source_file, "CPU_PERFORM_BX(ctx, ctx->pc);\n");
+    safe_fprintf(source_file, "goto LABN(A,start);\n");
+    
     safe_fprintf(source_file, "}\n");
 }
 
-static std::vector<u8> load_data(const std::string& path)
+static std::vector<u8> load_data(const std::string& path, const size_t align_to_n=0x1000)
 {
     FILE_ptr fh_ptr{fopen(path.c_str(), "rb")};
     if(!fh_ptr) return {};
@@ -2443,6 +2516,7 @@ static std::vector<u8> load_data(const std::string& path)
     std::vector<u8> data(fhsz);
     if(fread(data.data(), 1, data.size(), fh) != (size_t)fhsz) return {};
 
+    data.resize(ALIGN_TO_NUM(data.size(), align_to_n));
     return data;
 }
 
@@ -2460,5 +2534,6 @@ int main(int argc, char** argv)
     auto seg_rodata = load_data(argv[2]);
     auto seg_data = load_data(argv[3]);
 
-    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, false);
+    // abuse that argv[argc] is a valid access (gives NULL) by spec so that 5 or more args works
+    disasm_all_branches_from(0x0010'0000, seg_code, seg_rodata, seg_data, argv[4], false, false, &argv[5]);
 }

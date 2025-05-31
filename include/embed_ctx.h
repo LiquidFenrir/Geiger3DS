@@ -17,8 +17,8 @@ extern const unsigned long long g_embedded_ctx_header_size;
 #endif
 
 const char g_embedded_ctx_header[] = {
-#embed "arm_cpu_ctx.h"
-,'\0' // null terminator
+#embed "arm_cpu_ctx.h" suffix(,)
+'\0' // null terminator
 };
 const unsigned long long g_embedded_ctx_header_size = sizeof(g_embedded_ctx_header) - 1;
 

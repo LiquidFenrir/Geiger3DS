@@ -1,7 +1,13 @@
 #!/bin/bash
 
+set -e
+
 if [ "$#" -ne 3 ]; then
-    echo "Illegal number of parameters"
+    echo "Illegal number of parameters" && false
 fi
 
-$3/recompiler/recompiler "$1/code.bin"  "$1/rodata.bin"  "$1/data.bin" "$2" > "$2.dump.txt"
+sections_dir="$1"; shift
+output_path="$1"; shift
+build_dir="$1"; shift
+
+"$build_dir/recompiler/recompiler" "$sections_dir/code.bin"  "$sections_dir/rodata.bin"  "$sections_dir/data.bin" "$output_path" > "$output_path.dump.txt"
