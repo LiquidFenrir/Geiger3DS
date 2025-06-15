@@ -9,6 +9,9 @@ fi
 script_name=$0
 script_full_path=$(dirname "$0")
 
+examples_dir="$1"; shift
+build_dir="$1"; shift
+
 # prep_cmd="$1"; shift
 # recog_cmd="$1"; shift
 # check_cmd="$1"; shift
@@ -21,9 +24,6 @@ recog_cmd="true"
 check_cmd="true"
 # try to compile the C (result of recog) to x64
 compile_cmd="true"
-
-examples_dir="$1"; shift
-build_dir="$1"; shift
 
 # https://github.com/devkitPro/3ds-examples/
 echo "3ds examples dir $examples_dir"

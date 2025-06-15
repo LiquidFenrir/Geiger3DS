@@ -14,7 +14,24 @@ set(CAPSTONE_BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
 set(CAPSTONE_BUILD_STATIC_LIBS ON CACHE INTERNAL "")
 set(CAPSTONE_ARCHITECTURE_DEFAULT OFF CACHE INTERNAL "")
 set(CAPSTONE_ARM_SUPPORT ON CACHE INTERNAL "")
+
+FetchContent_Declare(
+  magic_enum
+  GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
+  GIT_TAG        a413fcc9c46a020a746907136a384c227f3cd095 # v0.9.7 + CMake and GCC 15 fixes
+)
+
+FetchContent_Declare(
+  fmt
+  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+  GIT_TAG        11.2.0
+)
+
+set(FMT_INSTALL OFF CACHE INTERNAL "")
+
 FetchContent_MakeAvailable(capstone)
+FetchContent_MakeAvailable(magic_enum)
+FetchContent_MakeAvailable(fmt)
 
 add_library(arm-context INTERFACE)
 target_include_directories(arm-context INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
