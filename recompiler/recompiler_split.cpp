@@ -3,30 +3,22 @@
 #include <fmt/format.h>
 #include <fmt/chrono.h>
 
-struct FILE_deleter {
-    void operator()(FILE* ptr)
-    {
-        fclose(ptr);
-    }
-};
-using FILE_ptr = std::unique_ptr<FILE, FILE_deleter>;
-
 static std::vector<u8_t> load_data(const std::string& path, const size_t align_to_n=0x1000u)
 {
-    FILE_ptr fh_ptr{fopen(path.c_str(), "rb")};
+    recompiler::FILE_ptr fh_ptr{std::fopen(path.c_str(), "rb")};
     if(!fh_ptr) return {};
 
     auto fh = fh_ptr.get();
-    fseek(fh, 0, SEEK_END);
-    const long fhsz = ftell(fh);
+    std::fseek(fh, 0, SEEK_END);
+    const long fhsz = std::ftell(fh);
     if(fhsz <= 0l) return {};
 
-    fseek(fh, 0, SEEK_SET);
+    std::fseek(fh, 0, SEEK_SET);
     std::vector<u8_t> data(fhsz);
-    if(fread(data.data(), 1, data.size(), fh) != (size_t)fhsz) return {};
+    if(std::fread(data.data(), 1, data.size(), fh) != (size_t)fhsz) return {};
 
     // ensure consistent behaviour whether or not the file was zero-padded to be page-aligned
-    data.resize(ALIGN_TO_NUM(data.size(), align_to_n));
+    data.resize(ALIGN_TO_NUM(data.size(), align_to_n), 0);
 
     return data;
 }
