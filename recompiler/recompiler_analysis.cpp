@@ -1,10 +1,3 @@
-#include <fmt/format.h>
-#include <fmt/ranges.h>
-#include <fmt/std.h>
-#define MAGIC_ENUM_RANGE_MIN -256
-#define MAGIC_ENUM_RANGE_MAX 256
-#include <magic_enum/magic_enum.hpp>
-
 #include <bitset>
 #include <compare>
 #include <utility>
@@ -12,6 +5,11 @@
 #include <span>
 
 #include "recompiler.h"
+#include "utils/formatters.h"
+#include "utils/bounds.h"
+#include "utils/offsets.h"
+#include "utils/fuzzy.h"
+#include "utils/scope.h"
 
 namespace p {
 
@@ -39,139 +37,7 @@ namespace null {
 
 using namespace recompiler;
 
-template <>
-struct magic_enum::customize::enum_range<arm_insn> {
-  static constexpr int min = 0;
-  static constexpr int max = ARM_INS_ALIAS_END;
-  // (max - min) must be less than UINT16_MAX.
-};
-template <>
-struct magic_enum::customize::enum_range<arm_reg> {
-  static constexpr int min = 0;
-  static constexpr int max = ARM_REG_ENDING;
-  // (max - min) must be less than UINT16_MAX.
-};
-
-struct skip_parse_flags {
-    constexpr fmt::format_parse_context::iterator parse(fmt::format_parse_context& ctx)
-    {
-        auto it = ctx.begin();
-        while(it != ctx.end() && *it != '}')
-            ++it;
-        return it;
-    }
-};
-
-#define CS_FORMATTER_ENUM(enum_type) \
-template <> struct fmt::formatter<enum_type> : skip_parse_flags { \
-    format_context::iterator format(const enum_type& value, format_context& ctx) const { \
-        constexpr size_t prefix_length = magic_enum::enum_name<static_cast<enum_type>(0)>().size() - 7; /* 0 -> ..._INVALID */ \
-        return fmt::format_to(ctx.out(), "{}", magic_enum::enum_name<enum_type>(value).substr(prefix_length)); \
-    } \
-};
-
-CS_FORMATTER_ENUM(cs_ac_type)
-CS_FORMATTER_ENUM(arm_op_type)
-CS_FORMATTER_ENUM(arm_reg)
-CS_FORMATTER_ENUM(arm_insn)
-CS_FORMATTER_ENUM(arm_shifter)
-
-// Don't need to customize, the Rx names are already the aliases
-/*
-// Сustom definitions of names for enum.
-// Specialization of `enum_name` must be injected in `namespace magic_enum::customize`.
-template <>
-constexpr magic_enum::customize::customize_t magic_enum::customize::enum_name<arm_reg>(arm_reg value) noexcept {
-    switch (value) {
-        case arm_reg::ARM_REG_R13:
-        return "ARM_REG_SP";
-    case arm_reg::ARM_REG_R14:
-        return "ARM_REG_LR";
-        case arm_reg::ARM_REG_R15:
-        return "ARM_REG_PC";
-    }
-    return default_tag;
-}
-*/
-
-template <> struct fmt::formatter<decltype(cs_arm_op::shift)> : skip_parse_flags {
-    format_context::iterator format(const auto& shift, format_context& ctx) const
-    {
-        auto it = ctx.out();
-
-        if(shift.type > ARM_SFT_REG)
-        {
-            it = fmt::format_to(it, "{} {}", (arm_shifter)(shift.type - ARM_SFT_REG), (arm_reg)shift.value);
-        }
-        else
-        {
-            it = fmt::format_to(it, "{} {}", shift.type, shift.value);
-        }
-
-        return fmt::format_to(it, ")");
-    }
-};
-template <> struct fmt::formatter<cs_insn> : skip_parse_flags {
-    format_context::iterator format(const cs_insn& insn, format_context& ctx) const
-    {
-        auto it = ctx.out();
-        it = fmt::format_to(it, "insn(");
-        it = fmt::format_to(it, "id={} ({}), ", insn.id, (arm_insn)insn.id);
-        if(insn.is_alias && insn.alias_id != (u64_t)-1)
-        {
-            it = fmt::format_to(it, "alias_id={} ({}), ", insn.id, (arm_insn)insn.alias_id);
-        }
-
-        return fmt::format_to(it, "text=\"{}{}{}\")", insn.mnemonic, insn.op_str[0] == '\0' ? "" : " ", insn.op_str);
-    }
-};
-template <> struct fmt::formatter<cs_arm_op> : skip_parse_flags {
-    format_context::iterator format(const cs_arm_op& op, format_context& ctx) const
-    {
-        auto it = ctx.out();
-        it = fmt::format_to(it, "op(type={}, access={}", op.type, (cs_ac_type)op.access);
-
-        switch(op.type)
-        {
-        case arm_op_type::ARM_OP_IMM:
-            it = fmt::format_to(it, ", imm={}", op.imm);
-            break;
-        case arm_op_type::ARM_OP_REG:
-            it = fmt::format_to(it, ", reg={}", (arm_reg)op.reg);
-            if(op.shift.value != 0)
-            {
-                it = fmt::format_to(it, " {}", op.shift);
-            }
-            break;
-        case arm_op_type::ARM_OP_MEM:
-            it = fmt::format_to(it, ", mem=(");
-            it = fmt::format_to(it, "base={}", op.mem.base);
-            if(op.mem.index != ARM_REG_INVALID)
-            {
-                it = fmt::format_to(it, ", offset_reg={}", op.mem.scale < 0 ? '-' : '+');
-                if(op.shift.value != 0)
-                {
-                    it = fmt::format_to(it, "({} {})", op.mem.index, op.shift);
-                }
-                else
-                {
-                    it = fmt::format_to(it, "{}", op.mem.index);
-                }
-            }
-            else if(op.mem.disp != 0)
-            {
-                it = fmt::format_to(it, ", offset_imm={}{}", op.mem.scale < 0 ? '-' : '+', op.mem.base);
-            }
-            it = fmt::format_to(it, ")");
-            break;
-        default:
-            assert(0);
-        }
-
-        return fmt::format_to(it, ")");
-    }
-};
-template <> struct fmt::formatter<recompiler::Program> : skip_parse_flags {
+template <> struct fmt::formatter<recompiler::Program> : skip_flags_parse {
     format_context::iterator format(const recompiler::Program& program, format_context& ctx) const
     {
         return fmt::format_to(ctx.out(), "Program(code @ 0x{:08x}, rodata @ 0x{:08x}, data @ 0x{:08x}, bss @ 0x{:08x}-0x{:08x})",
@@ -183,22 +49,6 @@ template <> struct fmt::formatter<recompiler::Program> : skip_parse_flags {
         );
     }
 };
-
-enum class Bound {
-    Open,
-    Closed,
-};
-template<Bound BL, Bound BH, typename T, typename L, typename H>
-constexpr bool is_between(const T& v, const L& low, const H& high)
-{
-    const bool low_ok = (BL == Bound::Open) ? low < v : low <= v;
-    if(!low_ok) return false;
-    
-    const bool high_ok = (BH == Bound::Open) ? v < high : v <= high;
-    if(!high_ok) return false;
-
-    return true;
-}
 
 constexpr bool find_in(const auto& r, auto&& v)
 {
@@ -274,189 +124,6 @@ constexpr int ldr_access_size(arm_insn id)
     return op.type == type;
 }
 
-enum class Kind : int {
-    Absolute,
-    RelativeByte,
-    RelativeThumb,
-    RelativeArm,
-};
-struct OffsetTranslator {
-    template<Kind K>
-    class Offset {
-        friend OffsetTranslator;
-        const OffsetTranslator* parent;
-        u32_t value;
-
-    public:
-        static constexpr inline Kind kind = K;
-        
-        // read the value contained
-        u32_t operator*() const noexcept
-        {
-            return value;
-        }
-        // read the value contained
-        u32_t get() const noexcept
-        {
-            return *(*this);
-        }
-        // read the value contained after converting to other Kind
-        template<Kind Kout>
-        u32_t get() const noexcept
-        {
-            return *to<Kout>();
-        }
-
-        template<Kind Kout = K>
-        Offset<Kout> make(u32_t replace_val) const noexcept
-        {
-            Offset<Kout> out(parent);
-            out.value = replace_val;
-            return out;
-        }
-
-        template<Kind Kout>
-        Offset<Kout> to() const noexcept
-        {
-            // shortcut
-            if constexpr (Kout == K) return *this;
-
-            auto out_value = value;
-
-            if constexpr (K == Kind::Absolute) out_value -= parent->program.code_sec.start_addr;
-            if constexpr (K > Kind::RelativeThumb) out_value *= 2;
-            if constexpr (K > Kind::RelativeByte) out_value *= 2;
-
-            // out_value is a relative byte offset
-
-            if constexpr (Kout > Kind::RelativeByte) out_value /= 2; // relative thumb offset
-            if constexpr (Kout > Kind::RelativeThumb) out_value /= 2; // relative arm offset
-            if constexpr (Kout == Kind::Absolute) out_value += parent->program.code_sec.start_addr; // absolute byte offset
-
-            return Offset<Kout>(parent, out_value);
-        }
-
-        /*
-        copy constructor
-        Correct implicit conversion between offset kinds, helps with passing around
-        */
-        template<Kind Kin>
-        Offset(const Offset<Kin>& in) noexcept
-            : Offset(in.parent, in.template get<K>())
-        { }
-        Offset(const Offset<K>& in) noexcept
-            : Offset(in.parent, in.value)
-        { }
-
-        /*
-        copy assignment operator
-        Correct implicit conversion between offset kinds, helps with passing around
-        */
-        template<Kind Kin>
-        Offset& operator=(const Offset<Kin>& in) noexcept
-        {
-            value = in.template get<K>();
-            return *this;
-        }
-        Offset& operator=(const Offset<K>& in) noexcept
-        {
-            parent = in.parent;
-            value = in.value;
-            return *this;
-        }
-
-        Offset& operator--() noexcept
-        {
-            --value;
-            return *this;
-        }
-        Offset& operator++() noexcept
-        {
-            ++value;
-            return *this;
-        }
-        
-        Offset operator--(int) noexcept
-        {
-            auto out = *this;
-            --value;
-            return out;
-        }
-        Offset operator++(int) noexcept
-        {
-            auto out = *this;
-            ++value;
-            return out;
-        }
-
-        bool valid() const noexcept
-        {
-            const auto absolute = to<Kind::Absolute>();
-            return parent->program.is_in(*absolute);
-        }
-        bool in_code(u32_t length = 0) const noexcept
-        {
-            const auto absolute = to<Kind::Absolute>();
-            return parent->program.code_sec.is_in(*absolute, length);
-        }
-
-        Offset() = delete;
-        
-        template<Kind Kin>
-        bool sibling(const Offset<Kin>& in) const noexcept
-        {
-            return parent == in.parent;
-        }
-        
-        // const OffsetTranslator* parent;
-    private:
-        Offset(const OffsetTranslator* p_in, u32_t v_in) noexcept
-            : parent(p_in)
-            , value(v_in)
-        { }
-
-        Offset(const OffsetTranslator* p_in) noexcept
-            : Offset(p_in, 0)
-        { }
-    };
-
-    template<typename T>
-    static constexpr inline bool is_offset_v = std::is_same_v<Offset<Kind::Absolute>, T>
-                    || std::is_same_v<Offset<Kind::RelativeByte>, T>
-                    || std::is_same_v<Offset<Kind::RelativeThumb>, T>
-                    || std::is_same_v<Offset<Kind::RelativeArm>, T>;
-
-    template<Kind K>
-    Offset<K> make(u32_t v_in = 0) const noexcept
-    {
-        return Offset<K>(this, v_in);
-    }
-
-    const Program& program;
-    explicit OffsetTranslator(const Program& program_in) noexcept
-        : program(program_in)
-    { }
-};
-template<Kind K>
-using Offset_t = OffsetTranslator::Offset<K>;
-
-template<Kind KL, Kind KR>
-std::partial_ordering operator<=>(const Offset_t<KL>& lhs, const Offset_t<KR>& rhs)
-{
-    if(not lhs.sibling(rhs))
-        return std::partial_ordering::unordered;
-
-    const auto l_abs = lhs.template get<Kind::Absolute>();
-    const auto r_abs = rhs.template get<Kind::Absolute>();
-
-    if(l_abs < r_abs)
-        return std::partial_ordering::less;
-    else if(l_abs == r_abs)
-        return std::partial_ordering::equivalent;
-    else
-        return std::partial_ordering::greater;
-}
-
 enum class BranchSource : u8_t {
     None,
     Static,
@@ -464,48 +131,21 @@ enum class BranchSource : u8_t {
     DynamicMemory,
     DynamicSwitch,
 };
-enum class Fuzzy : s8_t {
-    Unknown, // 0 hint
-    MaybeNo = -1,
-    No = -2,
-    MaybeYes = 1,
-    Yes = 2,
-};
-template <> struct fmt::formatter<Fuzzy> : skip_parse_flags {
-    format_context::iterator format(const Fuzzy& value, format_context& ctx) const {
-        return fmt::format_to(ctx.out(), "{}", magic_enum::enum_name(value));
-    }
-};
-bool is_sure(Fuzzy val)
-{
-    return val == Fuzzy::No || val == Fuzzy::Yes;
-}
-bool is_clueless(Fuzzy val)
-{
-    return val == Fuzzy::Unknown;
-}
-bool is_negative(Fuzzy val)
-{
-    return val == Fuzzy::MaybeNo || val == Fuzzy::No;
-}
-bool is_positive(Fuzzy val)
-{
-    return val == Fuzzy::MaybeYes || val == Fuzzy::Yes;
-}
-Fuzzy copy_sureness(Fuzzy direction, Fuzzy sureness)
-{
-    if(direction == Fuzzy::Unknown || sureness == Fuzzy::Unknown)
-        return Fuzzy::Unknown;
+enum class NoreturnCase : u8_t {
+    Unknown,
 
-    const bool vsig = is_negative(direction);
-    const bool smag = is_sure(sureness);
-    const s8_t out_mag = smag ? 2 : 1;
-    return static_cast<Fuzzy>(vsig ? -out_mag : out_mag);
-}
-Fuzzy copy_direction(Fuzzy sureness, Fuzzy direction)
-{
-    return copy_sureness(direction, sureness);
-}
+    // same condition state before conditional noreturn -> can propagate with the same flag
+
+    OnPass, // conditional execution
+    OnFail, // conditional execution
+
+    Never,
+    Always,
+};
+
+ENUM_FORMATTER_BASE(BranchSource)
+ENUM_FORMATTER_BASE(NoreturnCase)
+
 struct InsnMetadata {
     // absolute address
     u32_t addr{};
@@ -536,7 +176,7 @@ struct InsnMetadata {
     
     Fuzzy function_start{Fuzzy::Unknown};
     Fuzzy is_exit{Fuzzy::Unknown}; // -> noreturn (propagates up)
-    Fuzzy noreturn_path{Fuzzy::Unknown};
+    NoreturnCase noreturn_path{NoreturnCase::Unknown};
     // branch static destination, or detected dynamic/computed destination
     Fuzzy is_destination{Fuzzy::Unknown};
     // follows a branch with link and can in fact be returned to (link was not a noreturn)
@@ -565,9 +205,13 @@ struct InsnMetadata {
     {
         return is_condition(ARMCC_getOppositeCondition(opposite));
     }
+    bool unconditional_raw() const noexcept
+    {
+        return is_condition(ARMCC_AL) || undef();
+    }
     bool conditional() const noexcept
     {
-        if(is_condition(ARMCC_AL) || undef())
+        if(unconditional_raw())
             return false;
 
         // is branch, last branch was conditional with opposite condition
@@ -585,10 +229,7 @@ struct InsnMetadata {
     {
         return branch != BranchSource::None;
     }
-    bool is_noreturn() const noexcept
-    {
-        return noreturn_path == Fuzzy::Yes && (not is_branch() || not conditional());
-    }
+
     // any non-linear access visible
     bool is_jumped_to() const noexcept
     {
@@ -599,21 +240,25 @@ struct InsnMetadata {
         return is_destination == Fuzzy::No && is_return_destination == Fuzzy::No;
     }
 };
-
+struct PassInfo {
+    const char* name{nullptr};
+    unsigned extra_times{0};
+};
 struct Coverage {
     OffsetTranslator& builder;
     std::vector<InsnMetadata> metadatas;
+    std::vector<PassInfo> passes_applied;
 
     explicit Coverage(OffsetTranslator& builder_in)
         : builder(builder_in)
         , metadatas(builder.make<Kind::RelativeByte>(builder.program.code_sec.length()).get<Kind::RelativeArm>())
     { }
 
-    InsnMetadata& get_metadata(const Offset_t<Kind::RelativeArm> offset)
+    InsnMetadata& get_metadata(const Offset<Kind::RelativeArm> offset)
     {
         return metadatas[*offset];
     }
-    InsnMetadata* get_metadata_safe(const Offset_t<Kind::RelativeArm> offset)
+    InsnMetadata* get_metadata_safe(const Offset<Kind::RelativeArm> offset)
     {
         const auto raw_offset = *offset;
         if(raw_offset >= metadatas.size()) return nullptr;
@@ -728,12 +373,12 @@ struct Coverage {
 
             if(meta.is_exit == Fuzzy::Yes)
                 out.is_exit += 1;
-            if(meta.is_noreturn())
-                out.is_noreturn += 1;
+            // if(meta.is_noreturn())
+            //     out.is_noreturn += 1;
 
             // noreturn_stop_point will be > is_noreturn because noreturn blocks end on a conditional branch
-            if(meta.noreturn_path == Fuzzy::Yes)
-                out.noreturn_stop_point += 1;
+            // if(meta.noreturn_path == Fuzzy::Yes)
+            //     out.noreturn_stop_point += 1;
 
             if(meta.is_code == Fuzzy::Yes)
             {
@@ -753,7 +398,7 @@ struct Coverage {
         return out;
     }
 };
-template <> struct fmt::formatter<Coverage::FuzzyStats> : skip_parse_flags {
+template <> struct fmt::formatter<Coverage::FuzzyStats> : skip_flags_parse {
     format_context::iterator format(const Coverage::FuzzyStats& value, format_context& ctx) const
     {
 #define format_sep "={}, "
@@ -774,7 +419,7 @@ template <> struct fmt::formatter<Coverage::FuzzyStats> : skip_parse_flags {
 #undef format_finish
     }
 };
-template <> struct fmt::formatter<Coverage::Stats> : skip_parse_flags {
+template <> struct fmt::formatter<Coverage::Stats> : skip_flags_parse {
     format_context::iterator format(const Coverage::Stats& value, format_context& ctx) const
     {
 #define format_sep "={}, "
@@ -803,7 +448,7 @@ template <> struct fmt::formatter<Coverage::Stats> : skip_parse_flags {
 #undef format_finish
     }
 };
-template <> struct fmt::formatter<InsnMetadata> : skip_parse_flags {
+template <> struct fmt::formatter<InsnMetadata> : skip_flags_parse {
     format_context::iterator format(const InsnMetadata& value, format_context& ctx) const
     {
         std::string extra_end;
@@ -835,23 +480,6 @@ template <> struct fmt::formatter<InsnMetadata> : skip_parse_flags {
     }
 };
 
-struct Handle_csh {
-    csh handle;
-    Handle_csh(auto&&... args)
-    {
-        cs_open(args..., &handle);
-        // cs_option(handle, CS_OPT_ONLY_OFFSET_BRANCH, CS_OPT_ON); // only affects printing: immediate integer is still absolute
-        // cs_option(handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_CS_REG_ALIAS);
-        cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
-        cs_option(handle, CS_OPT_DETAIL, CS_OPT_DETAIL_REAL);
-        cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON);
-    }
-    ~Handle_csh()
-    {
-        cs_close(&handle);
-    }
-};
-
 struct PassDataBase {
     const cs_insn& insn;
     std::span<u16_t> regs_read, regs_write;
@@ -863,13 +491,13 @@ struct PassData : PassDataBase {
     const cs_detail* const detail{insn.detail};
     const cs_arm& arm{detail ? detail->arm : cs_arm{}};
 
-    Offset_t<Kind::Absolute> next_address = builder.make<Kind::Absolute>(insn.address + insn.size);
-    const Offset_t<Kind::RelativeArm> insn_offset_next = next_address;
-    const Offset_t<Kind::RelativeArm> insn_offset_prev = builder.make<Kind::Absolute>(insn.address - insn.size);
-    const Offset_t<Kind::RelativeArm> insn_offset = builder.make<Kind::Absolute>(insn.address);
+    Offset<Kind::Absolute> next_address = builder.make<Kind::Absolute>(insn.address + insn.size);
+    const Offset<Kind::RelativeArm> insn_offset_next = next_address;
+    const Offset<Kind::RelativeArm> insn_offset_prev = builder.make<Kind::Absolute>(insn.address - insn.size);
+    const Offset<Kind::RelativeArm> insn_offset = builder.make<Kind::Absolute>(insn.address);
 
-    const Offset_t<Kind::RelativeByte> insn_byte_offset = insn_offset;
-    const Offset_t<Kind::Absolute> insn_addr = insn_offset;
+    const Offset<Kind::RelativeByte> insn_byte_offset = insn_offset;
+    const Offset<Kind::Absolute> insn_addr = insn_offset;
 
     const InsnMetadata* const metadata_prev = cover.get_metadata_safe(insn_offset_prev);
     InsnMetadata& metadata = cover.get_metadata(insn_offset);
@@ -892,7 +520,25 @@ template<class P, class T>
 struct Pass {
     OffsetTranslator& builder;
     Coverage& cover;
+    const char* pass_name;
     T data;
+
+    void start()
+    {
+        if(cover.passes_applied.empty() or cover.passes_applied.back().name != pass_name)
+        {
+            cover.passes_applied.emplace_back().name = pass_name;
+        }
+        else
+        {
+            cover.passes_applied.back().extra_times++;
+        }
+    }
+
+    void finish()
+    {
+
+    }
 
     u64_t operator()(const PassDataBase& base, auto&&... args)
     {
@@ -911,13 +557,13 @@ struct Pass {
         void operator()args { [[maybe_unused]] auto& [ __VA_ARGS__ ] = *(Data_t*)(this);
 
 #define PASS_CREATE_FINISH(name) } }; \
-    Pass<name##_t, name##_t::Data_t> name(builder, cover, name##_t_get_members());
+    Pass<name##_t, name##_t::Data_t> name(builder, cover, #name, name##_t_get_members());
 
 template<class P>
 static void iterate_all_insn(const Handle_csh& handle_ptr, const Section& code_sec, P& pass, auto&&... args)
 {
     csh handle = handle_ptr.handle;
-    cs_insn_ptr insn_ptr{cs_malloc(handle)};
+    cs_insn_ptr insn_ptr = handle_ptr.alloc_insn();
     cs_insn& insn = *insn_ptr;
     const auto code = code_sec.bytes;
     const u8_t* const code_ptr_init = code.data();
@@ -935,6 +581,7 @@ static void iterate_all_insn(const Handle_csh& handle_ptr, const Section& code_s
     std::span regs_read(regs_read_val);
     std::span regs_write(regs_write_val);
 
+    pass.start();
     while(code_size > 0)
     {
         const bool iter_success = cs_disasm_iter(handle, &code_ptr, &code_size, &address, &insn);
@@ -949,19 +596,7 @@ static void iterate_all_insn(const Handle_csh& handle_ptr, const Section& code_s
         code_ptr = code_ptr_init + address_offset;
         code_size = code_size_init - address_offset;
     }
-}
-
-template<typename F>
-struct OnExitScope {
-    F&& f;
-    ~OnExitScope()
-    {
-        f();
-    }
-};
-auto call_on_scope_exit(auto&& f)
-{
-    return OnExitScope(std::forward<decltype(f)>(f));
+    pass.finish();
 }
 
 namespace passes {
@@ -1031,29 +666,6 @@ VisitTagged analysis(const Program& program)
 
         u64_t initial_skip_offset = 0;
         size_t visited_len_pass_1 = 0;
-
-#pragma region "Passes helper functions"
-        /*
-        auto wrap_insn_iter_func = [&](auto&& fn) {
-            return [&](const IterationData& data, auto&&... args) -> u64_t {
-                auto insn_offset_next = builder.make<Kind::Absolute>(data.insn.address).to<Kind::RelativeArm>();
-                auto insn_offset_prev = insn_offset_next++;
-                auto insn_offset = insn_offset_prev--;
-
-                IterationCallbackData cbdata{
-                    .insn_offset = insn_offset,
-                    .next_address = builder.make<Kind::Absolute>(data.insn.address + data.insn.size),
-                    .metadata_prev = cover.get_metadata_safe(insn_offset_prev),
-                    .metadata = cover.get_metadata(insn_offset),
-                    .metadata_next = cover.get_metadata_safe(insn_offset_next),
-                };
-
-                fn(data, cbdata, std::forward<decltype(args)>(args)...);
-                return *cbdata.next_address;
-            };
-        };
-        */
-#pragma endregion
 
 #pragma region "Pass 0: init"
         PASS_CREATE_START(Pass0,
@@ -1271,7 +883,7 @@ VisitTagged analysis(const Program& program)
                 if(arm.cc == ARMCC_AL && *insn_offset == 0)
                 {
                     initial_skip_offset = branch_target_abs.get<Kind::RelativeByte>();
-                    for(Offset_t<Kind::RelativeArm> a = insn_offset_next; a < branch_target_abs; ++a)
+                    for(Offset<Kind::RelativeArm> a = insn_offset_next; a < branch_target_abs; ++a)
                     {
                         auto& inbetween_meta = cover.get_metadata(a);
                         inbetween_meta.is_code = Fuzzy::No;
@@ -1613,6 +1225,11 @@ VisitTagged analysis(const Program& program)
 
             case ARM_INS_SVC: {
                 const s64_t svc_id = ops[0].imm;
+                if(arm.cc != ARMCC_AL)
+                {
+                    // no conditional svc allowed (or at least seen outside of detection errors)
+                    failed_detection();
+                }
                 if(svc_id >= 0x80 && svc_id != 0xff)
                 {
                     // invalid svc range (only 0 <= 0x7f, and 0xff for debug breakpoint)
@@ -1624,7 +1241,7 @@ VisitTagged analysis(const Program& program)
                 case 0x09: // exitthread
                 case 0x3c: // break
                     metadata.is_exit = Fuzzy::Yes;
-                    metadata.noreturn_path = Fuzzy::Yes;
+                    metadata.noreturn_path = NoreturnCase::Always;
                     break;
                 }
                 break;
@@ -1723,7 +1340,7 @@ VisitTagged analysis(const Program& program)
                 else if(metadata_prev->branch_with_link == Fuzzy::Yes)
                 {
                     // follows a call. still might be a tail call/to a noreturn (panic, etc)
-                    if(metadata_prev->is_noreturn())
+                    if(metadata_prev->noreturn_path == NoreturnCase::Always)
                     {
                         do_downgrade(metadata.is_return_destination, Fuzzy::No);
                     }
@@ -1784,16 +1401,24 @@ VisitTagged analysis(const Program& program)
                     if(metadata.branch_with_link == Fuzzy::Yes)
                         do_upgrade(dest_metadata.function_start, metadata.reachable);
 
-                    // jump to a sure noreturn branch -> self is noreturn
-                    // does not propagate if self is conditional
-                    if(dest_metadata.is_noreturn() && not metadata.conditional())
+                    if(dest_metadata.noreturn_path == NoreturnCase::Always)
                     {
-                        do_upgrade(metadata.noreturn_path, Fuzzy::Yes);
+                        metadata.noreturn_path = metadata.conditional() ? NoreturnCase::OnPass : NoreturnCase::Always;
                     }
+
+                    
+                    if(metadata_next != nullptr && metadata_next->reachable == Fuzzy::Yes && metadata_next->is_code == Fuzzy::Yes)
+                    {
+                        
+                    }
+                }
+                else if(metadata.branch == BranchSource::None)
+                {
+                    // not a branch
                 }
             }
 
-            if(metadata.is_return_destination == Fuzzy::Yes && (ARMCC_CondCodes)metadata.cc != ARMCC_AL && (ARMCC_CondCodes)metadata.cc != ARMCC_UNDEF)
+            if(metadata.is_return_destination == Fuzzy::Yes && not metadata.unconditional_raw())
             {
                 // is returned to, but is conditional: flags are trashed. always bad.
                 do_downgrade(metadata.reachable, Fuzzy::No);
@@ -1802,16 +1427,28 @@ VisitTagged analysis(const Program& program)
 
             if(metadata_next != nullptr && metadata_next->reachable == Fuzzy::Yes && metadata_next->is_code == Fuzzy::Yes)
             {
-                if(metadata_next->is_noreturn() && not (metadata.is_branch() && not metadata.conditional()))
+                if(metadata_next->noreturn_path == NoreturnCase::Always)
                 {
-                    // next instruction was marked as a noreturn part before
-                    // -> become noreturn as well
-                    // noreturn propagation stops on:
-                    // - unconditional branching
-                    // - conditional branching to the noreturn part
-                    // so only up to a point that will be for sure noreturn
-                    // aka a function may return in a branch and not on another -> entrypoint is not noreturn, only the branch that goes to that
-                    do_upgrade(metadata.noreturn_path, Fuzzy::Yes);
+                    if(metadata.branch == BranchSource::None)
+                    {
+                        // not a branch
+                        if(metadata_next->is_branch() && metadata_next->conditional())
+                        {
+
+                        }
+                        else
+                        {
+                            metadata.noreturn_path = NoreturnCase::Always;
+                        }
+                    }
+                    else if(metadata.conditional())
+                    {
+
+                    }
+                    else
+                    {
+                        // uncond branch
+                    }
                 }
             }
         }
@@ -1882,15 +1519,27 @@ VisitTagged analysis(const Program& program)
 
         perform_propagate_pass_full();
 
+        [&] {
+            using p::base::println;
+            using p::base::print;
 
-
-        iterate_all_insn({CS_ARCH_ARM, CS_MODE_ARM}, program.code_sec, PassF, stdout);
+            for(const auto pass_info : cover.passes_applied)
+            {
+                print_to(stdout, "{}", pass_info.name);
+                if(pass_info.extra_times)
+                {
+                    print_to(stdout, " (x{})", pass_info.extra_times + 1);
+                }
+                println_to(stdout, "");
+            }
+            iterate_all_insn({CS_ARCH_ARM, CS_MODE_ARM}, program.code_sec, PassF, stdout);
+        }();
     }
 
     if(false)
     {
         Handle_csh handle_thumb{CS_ARCH_ARM, CS_MODE_THUMB};
-        cs_insn_ptr insn_thumb{cs_malloc(handle_thumb.handle)};
+        cs_insn_ptr insn_thumb = handle_thumb.alloc_insn();
         std::vector<InsnMetadata> metadata_thumb(visits.unknown.root.length() / 2);
     }
 

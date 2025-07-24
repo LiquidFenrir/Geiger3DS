@@ -2344,7 +2344,8 @@ static void disasm_all_branches_from(const u32_t start_addr, std::span<const u8_
     // auto labels_arm_file = labels_arm_file_ptr.get();
     // auto labels_thumb_file = labels_thumb_file_ptr.get();
 
-    safe_fwrite(g_embedded_ctx_header, g_embedded_ctx_header_size, 1, source_file);
+    safe_fwrite(g_embedded_types_header, g_embedded_types_header_size, 1, source_file);
+    safe_fwrite(g_embedded_ctx_header + CTX_HEADER_INCLUDE_LENGTH, g_embedded_ctx_header_size - CTX_HEADER_INCLUDE_LENGTH, 1, source_file);
     safe_fwrite(g_embedded_utils_header + UTILS_HEADER_INCLUDE_LENGTH, g_embedded_ctx_header_size - UTILS_HEADER_INCLUDE_LENGTH, 1, source_file);
     safe_fprintf(source_file, "\nvoid ATTR_ENTRY_CALLCONV ATTR_NORETURN ATTR_NO_SAVE_REGS entry(arm_cpu_ctx* const ctx) {\n");
 

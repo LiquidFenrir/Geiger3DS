@@ -12,7 +12,7 @@ build-*/
 *.lab.arm.c
 *.lab.thumb.c
 .vscode/
-capstone/
 3ds-examples/
+test-data/
 
 !CMakeLists.txt

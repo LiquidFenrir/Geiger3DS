@@ -1,4 +1,5 @@
 #include "recompiler.h"
+#include "utils/files.h"
 #include <chrono>
 #include <fmt/format.h>
 #include <fmt/chrono.h>
@@ -60,5 +61,5 @@ int main(int argc, char** argv)
     analysis(prog);
     const auto after_time = std::chrono::steady_clock::now();
     const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(after_time - before_time);
-    fmt::println("Time taken: {}", dur);
+    fmt::println("Time taken: (Analysis) {}", dur);
 }

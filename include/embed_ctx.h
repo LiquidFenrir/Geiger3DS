@@ -9,6 +9,8 @@ extern const char g_embedded_ctx_header[];
 extern const unsigned long long g_embedded_ctx_header_size;
 extern const char g_embedded_utils_header[];
 extern const unsigned long long g_embedded_utils_header_size;
+extern const char g_embedded_types_header[];
+extern const unsigned long long g_embedded_types_header_size;
 
 #ifdef __cplusplus
 }
@@ -29,6 +31,13 @@ const char g_embedded_utils_header[] = {
 '\0' // nul terminator
 };
 const unsigned long long g_embedded_utils_header_size = sizeof(g_embedded_utils_header) - 1;
+
+const char g_embedded_types_header[] = {
+#embed "typedefs.h" suffix(,)
+'\0' // nul terminator
+};
+const unsigned long long g_embedded_types_header_size = sizeof(g_embedded_types_header) - 1;
+
 
 #endif
 
