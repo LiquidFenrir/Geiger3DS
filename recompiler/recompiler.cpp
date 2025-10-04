@@ -2,10 +2,9 @@
 
 extern "C" {
 #include <arm_cpu_ctx.h>
-
-#include <capstone/platform.h>
-#include <capstone/capstone.h>
 }
+
+#include "capstone_inc.h"
 
 #include <cstdio>
 #include <cstring>

@@ -3,6 +3,8 @@ project(geiger3ds LANGUAGES C CXX)
 
 set(BUILD_TESTING OFF CACHE BOOL "build testing" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "static link" FORCE)
+# set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "pic codegen" FORCE)
+# set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE CACHE BOOL "lto" FORCE)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -28,6 +30,8 @@ FetchContent_Declare(
 )
 
 set(FMT_INSTALL OFF CACHE INTERNAL "")
+set(FMT_OS OFF CACHE INTERNAL "")
+set(FMT_USE_LOCALE 0 CACHE INTERNAL "")
 
 FetchContent_Declare(
   xbyak

@@ -1,36 +1,10 @@
 #pragma once
 
 #include "formatters_base.h"
+#include "../capstone_inc.h"
+#include "../magic_enum_inc.h"
 
-extern "C" {
 #include <typedefs.h>
-
-#include <capstone/platform.h>
-#include <capstone/capstone.h>
-}
-
-#define ENUM_FORMATTER_CS(enum_type) \
-template <> struct fmt::formatter<enum_type> : skip_flags_parse { \
-    format_context::iterator format(const enum_type value, format_context& ctx) const { \
-        constexpr size_t prefix_length = magic_enum::enum_name<static_cast<enum_type>(0)>().size() - 7; /* 0 -> ..._INVALID */ \
-        return fmt::format_to(ctx.out(), "{}", magic_enum::enum_name<enum_type>(value).substr(prefix_length)); \
-    } \
-};
-
-ENUM_FORMATTER_CS(cs_ac_type)
-ENUM_FORMATTER_CS(arm_op_type)
-ENUM_FORMATTER_RANGE(arm_reg, 0, ARM_REG_ENDING)
-ENUM_FORMATTER_CS(arm_reg)
-ENUM_FORMATTER_RANGE(arm_insn, 0, ARM_INS_ALIAS_END)
-ENUM_FORMATTER_CS(arm_insn)
-ENUM_FORMATTER_CS(arm_shifter)
-
-template <> struct fmt::formatter<ARMCC_CondCodes> : skip_flags_parse {
-    format_context::iterator format(const ARMCC_CondCodes value, format_context& ctx) const {
-        constexpr size_t prefix_length = std::size("ARMCC_") - 1;
-        return fmt::format_to(ctx.out(), "{}", magic_enum::enum_name<ARMCC_CondCodes>(value).substr(prefix_length));
-    }
-};
 
 template <> struct fmt::formatter<decltype(cs_arm_op::shift)> : skip_flags_parse {
     format_context::iterator format(const auto& shift, format_context& ctx) const
@@ -49,6 +23,7 @@ template <> struct fmt::formatter<decltype(cs_arm_op::shift)> : skip_flags_parse
         return fmt::format_to(it, ")");
     }
 };
+
 template <> struct fmt::formatter<cs_insn> : skip_flags_parse {
     format_context::iterator format(const cs_insn& insn, format_context& ctx) const
     {
@@ -73,6 +48,7 @@ template <> struct fmt::formatter<cs_insn> : skip_flags_parse {
         return fmt::format_to(it, "text=\"{}{}{}\")", insn.mnemonic, insn.op_str[0] == '\0' ? "" : " ", insn.op_str);
     }
 };
+
 template <> struct fmt::formatter<cs_arm_op> : skip_flags_parse {
     format_context::iterator format(const cs_arm_op& op, format_context& ctx) const
     {
@@ -119,21 +95,3 @@ template <> struct fmt::formatter<cs_arm_op> : skip_flags_parse {
         return fmt::format_to(it, ")");
     }
 };
-
-// Don't need to customize, the Rx names are already the aliases
-/*
-// Сustom definitions of names for enum.
-// Specialization of `enum_name` must be injected in `namespace magic_enum::customize`.
-template <>
-constexpr magic_enum::customize::customize_t magic_enum::customize::enum_name<arm_reg>(arm_reg value) noexcept {
-    switch (value) {
-        case arm_reg::ARM_REG_R13:
-        return "ARM_REG_SP";
-    case arm_reg::ARM_REG_R14:
-        return "ARM_REG_LR";
-        case arm_reg::ARM_REG_R15:
-        return "ARM_REG_PC";
-    }
-    return default_tag;
-}
-*/

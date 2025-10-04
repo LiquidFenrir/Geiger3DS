@@ -1,14 +1,10 @@
 #pragma once
 
-extern "C" {
 #include <typedefs.h>
-
-#include <capstone/platform.h>
-#include <capstone/capstone.h>
-}
 
 #include <memory>
 #include "formatters.h"
+#include "capstone_inc.h"
 
 namespace recompiler {
 
@@ -103,7 +99,7 @@ bool op_is(const cs_arm_op& op, arm_reg reg)
 }
 bool op_is(const cs_arm_op& op, int64_t imm)
 {
-    return op.type == ARM_OP_IMM && op.reg == imm;
+    return op.type == ARM_OP_IMM && op.imm == imm;
 }
 
 }

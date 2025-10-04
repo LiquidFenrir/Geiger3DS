@@ -71,9 +71,6 @@ enum class NoreturnCase : u8_t {
     Always,
 };
 
-ENUM_FORMATTER_BASE(BranchSource)
-ENUM_FORMATTER_BASE(NoreturnCase)
-
 struct InsnMetadata {
     // absolute address
     u32_t addr{};

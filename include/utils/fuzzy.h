@@ -61,5 +61,3 @@ inline Fuzzy copy_direction(Fuzzy sureness, Fuzzy direction)
 }
 
 }
-
-ENUM_FORMATTER_BASE(recompiler::Fuzzy)

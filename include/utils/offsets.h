@@ -198,5 +198,3 @@ inline std::partial_ordering operator<=>(const Offset<KL>& lhs, const Offset<KR>
 }
 
 }
-
-ENUM_FORMATTER_BASE(recompiler::Kind)

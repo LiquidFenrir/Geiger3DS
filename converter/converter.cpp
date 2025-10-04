@@ -1,3 +1,15 @@
+#include <concepts>
+#include <type_traits>
+#include <chrono>
+#include <utility>
+#include <functional>
+#include <algorithm>
+#include <xbyak/xbyak.h>
+
+#include "capstone_inc.h"
+#include "arm_cpu_asm_ctx.h"
+#include "magic_enum_inc.h"
+
 #include "utils/program.h"
 #include "utils/arm_info.h"
 #include "utils/section.h"
@@ -6,21 +18,23 @@
 #include "utils/offsets.h"
 #include "utils/signature_info.h"
 #include "utils/overload.h"
-#include "arm_cpu_asm_ctx.h"
-#include <concepts>
-#include <type_traits>
-#include <chrono>
-#include <utility>
-#include <functional>
-#include <algorithm>
-#include <fmt/format.h>
-#include <fmt/chrono.h>
-#include <xbyak/xbyak.h>
-#include <magic_enum/magic_enum_switch.hpp>
 
 namespace ranges = std::ranges;
 
-#define PRINT_NULLIFY 1
+// #define PRINT_NULLIFY 1
+#define FORCE_DEBUG 1
+
+#if defined(NDEBUG) && !defined(FORCE_DEBUG)
+#define REPORT_ERROR(...) throw std::runtime_error(fmt::format(__VA_ARGS__));
+#else
+#define REPORT_ERROR(...) fmt::println(__VA_ARGS__);
+#endif
+
+#if defined(NDEBUG) && !defined(FORCE_DEBUG)
+#define DEBUG_BLOCK() if(false)
+#else
+#define DEBUG_BLOCK() if(true)
+#endif
 
 namespace recompiler {
 
@@ -75,6 +89,31 @@ concept is_branch = one_of<I, ARM_INS_B, ARM_INS_BX>;
 template<typename I>
 concept is_branch_with_link = one_of<I, ARM_INS_BL, ARM_INS_BLX>;
 
+#define PARALLEL_ARITH_OP_(nam) ARM_INS_ ## nam
+
+#define PARALLEL_ARITH_OPS(prefix) \
+    PARALLEL_ARITH_OP_(prefix ## ADD8), \
+    PARALLEL_ARITH_OP_(prefix ## ADD16), \
+    PARALLEL_ARITH_OP_(prefix ## SUB8), \
+    PARALLEL_ARITH_OP_(prefix ## SUB16), \
+    PARALLEL_ARITH_OP_(prefix ## ASX), \
+    PARALLEL_ARITH_OP_(prefix ## SAX)
+
+template<typename I>
+concept is_parallel_arithmetic_signed = one_of<I, PARALLEL_ARITH_OPS(S)>;
+template<typename I>
+concept is_parallel_arithmetic_unsigned = one_of<I, PARALLEL_ARITH_OPS(U)>;
+
+template<typename I>
+concept is_parallel_arithmetic_signed_saturating = one_of<I, PARALLEL_ARITH_OPS(Q)>;
+template<typename I>
+concept is_parallel_arithmetic_unsigned_saturating = one_of<I, PARALLEL_ARITH_OPS(UQ)>;
+
+template<typename I>
+concept is_parallel_arithmetic_signed_halving = one_of<I, PARALLEL_ARITH_OPS(SH)>;
+template<typename I>
+concept is_parallel_arithmetic_unsigned_halving = one_of<I, PARALLEL_ARITH_OPS(UH)>;
+
 template<typename I>
 concept is_store_to_mem_multiple = one_of<I, ARM_INS_STM, ARM_INS_STMIB, ARM_INS_STMDA, ARM_INS_STMDB>;
 template<typename I>
@@ -118,22 +157,6 @@ concept is_signed_mul = one_of<I,
 template<typename I>
 concept is_special_mul = is_unsigned_mul<I> || is_signed_mul<I>;
 
-/*
-eax <- r0
-ebx
-ecx
-edx <- r3
-
-esi <- r4
-edi <- r5
-
-esp <- x86 sp, sp
-ebp <- lr
-eip <- x86 pc, cant use
-
-r8d <- pc
-r9 <- context ptr (64bit)
-*/
 struct Converter : Xbyak::CodeGenerator {
     OffsetTranslator builder;
 
@@ -172,18 +195,13 @@ struct Converter : Xbyak::CodeGenerator {
 
     void append_instruction(const cs_insn& insn)
     {
-#ifdef NDEBUG
-#define REPORT_ERROR(...) throw std::runtime_error(fmt::format(__VA_ARGS__));
-#else
-#define REPORT_ERROR(...) fmt::println(__VA_ARGS__);
-#endif
-
         if(insn.id == ARM_INS_INVALID)
             return;
 
         if(insn.detail == nullptr)
             return;
 
+        const std::string addr_string = make_label(insn.address);
         const std::span<const u8_t> grps = std::span(insn.detail->groups, insn.detail->groups_count);
 
         // removes about 70% of the possible instructions
@@ -309,10 +327,12 @@ struct Converter : Xbyak::CodeGenerator {
             case ARM_INS_UDF:
             case ARM_INS_CLREX:
             case ARM_INS_PLD:
+            case ARM_INS_MOVS:
+            case ARM_INS_BKPT:
                 break;
             default:
                 // probably should be silent? maybe still helps to know when something is unimplemented
-                REPORT_ERROR("WEIRD UNDEF @ 0x{:08x}: {}", insn.address, insn);
+                REPORT_ERROR("WEIRD UNDEF @ {}: {}", addr_string, insn);
                 return;
             }
         }
@@ -356,14 +376,13 @@ struct Converter : Xbyak::CodeGenerator {
         {
             // lets me know to maybe implement something
             // maybe ignore later when it becomes a false positive generator
-            REPORT_ERROR("UNIMPL @ 0x{:08x}: {}", insn.address, insn);
+            REPORT_ERROR("UNIMPL @ {}: {}", addr_string, insn);
             return;
         }
 
         cs_regs regs_read_val, regs_write_val;
         u8_t read_count = 0, write_count = 0;
         cs_regs_access(handle, &insn, regs_read_val, &read_count, regs_write_val, &write_count);
-        const std::string addr_string = make_label(insn.address);
 
         InstructionState state{
             .insn = insn,
@@ -397,7 +416,7 @@ struct Converter : Xbyak::CodeGenerator {
         const auto interp_size = end_point - start_point;
         if( interp_size >= Converter::INSN_RESERVED_SIZE )
         {
-            REPORT_ERROR("EXCESS {} @ 0x{:08x}: {}", interp_size, insn.address, insn);
+            REPORT_ERROR("EXCESS {} @ {}: {}", interp_size, addr_string, insn);
             return;
         }
     }
@@ -413,6 +432,25 @@ private:
         const std::span<const cs_arm_op> ops = detail ? std::span(arm.operands, arm.op_count) : std::span<const cs_arm_op>{};
     };
 
+#define PRINT_TODO_INSN(state_var) fmt::println("TODO({}:{}) {}: {}", __FILE__, __LINE__, state_var.addr_string, state_var.insn)
+
+#define HANDLE_INSN(insn_type) \
+    void instruction([[maybe_unused]] const InstructionState& state, enum_constant<insn_type>)
+#define HANDLE_INSN_CONCEPT(template_name, concepts) \
+    template<typename template_name> requires concepts \
+    void instruction([[maybe_unused]] const InstructionState& state, template_name)
+
+#define VALIDATE_INSN(insn_type) \
+    bool validate([[maybe_unused]] const InstructionState& state, enum_constant<insn_type>)
+#define VALIDATE_INSN_CONCEPT(template_name, concepts) \
+    template<typename template_name> requires concepts \
+    bool validate([[maybe_unused]] const InstructionState& state, template_name)
+
+#define DUMMY_INSN(insn_type) \
+    HANDLE_INSN(ARM_INS_ ## insn_type) { PRINT_TODO_INSN(state); }
+#define DUMMY_INSN_CONCEPT(concept_name) \
+    HANDLE_INSN_CONCEPT(INSN, concept_name<INSN>) { PRINT_TODO_INSN(state); }
+
     const char* get_cpu_mode_str(cs_mode cpu_mode) const
     {
         switch(cpu_mode)
@@ -422,7 +460,8 @@ private:
         case CS_MODE_THUMB:
             return "Thumb";
         default:
-            std::unreachable();
+            return "Unkown";
+            // std::unreachable();
         }
     }
     const char* get_cpu_mode_str() const
@@ -439,19 +478,37 @@ private:
     {
         return make_label(to_addr, get_cpu_mode());
     }
+    /*
+    eax <- r0
+    ebx
+    ecx
+    edx <- r3
 
-    static constexpr inline auto direct_register_map = OverloadList<arm_reg, const Xbyak::Reg32 (Xbyak::CodeGenerator::*)>
+    esi <- r4
+    edi <- r5
+
+    esp <- x86 sp == arm sp
+    ebp <- lr
+    eip <- x86 pc, cant use
+
+    r8d <- pc
+    r9 <- context ptr (64bit)
+    
+    r10 onwards are GPRs for computation
+    */
+    using direct_register_map = OverloadList<arm_reg, const Xbyak::Reg32 (Xbyak::CodeGenerator::*)>
         ::with<ARM_REG_R0, &Xbyak::CodeGenerator::eax>
         ::with<ARM_REG_R1, &Xbyak::CodeGenerator::ebx>
         ::with<ARM_REG_R2, &Xbyak::CodeGenerator::ecx>
         ::with<ARM_REG_R3, &Xbyak::CodeGenerator::edx>
         ::with<ARM_REG_R4, &Xbyak::CodeGenerator::esi>
+        ::with<ARM_REG_R5, &Xbyak::CodeGenerator::edi>
         ::with<ARM_REG_SP, &Xbyak::CodeGenerator::esp>
         ::with<ARM_REG_LR, &Xbyak::CodeGenerator::ebp>
-        ::with<ARM_REG_PC, &Xbyak::CodeGenerator::r10d>
-        ::make();
+        ::with<ARM_REG_PC, &Xbyak::CodeGenerator::r8d>
+        ::type;
     
-    static constexpr inline auto indirect_register_map = OverloadList<arm_reg, std::size_t>
+    using indirect_register_map = OverloadList<arm_reg, std::size_t>
         ::with<ARM_REG_R6, offsetof(arm_cpu_asm_ctx, r6)>
         ::with<ARM_REG_R7, offsetof(arm_cpu_asm_ctx, r7)>
         ::with<ARM_REG_R8, offsetof(arm_cpu_asm_ctx, r8)>
@@ -459,62 +516,69 @@ private:
         ::with<ARM_REG_R10, offsetof(arm_cpu_asm_ctx, r10)>
         ::with<ARM_REG_R11, offsetof(arm_cpu_asm_ctx, r11)>
         ::with<ARM_REG_R12, offsetof(arm_cpu_asm_ctx, r12)>
-        ::make();
+        ::type;
 
     template<arm_reg REG>
-    requires requires { direct_register_map.get(enum_constant<REG>{}); }
-    Xbyak::Reg32 get_arm_reg(enum_constant<REG> reg)
+    requires (direct_register_map::is_key_value<REG>)
+    Xbyak::Reg32 get_arm_reg_direct(enum_constant<REG>)
     {
-        const auto member_offset = direct_register_map.get(reg);
+        const auto member_offset = direct_register_map::get<REG>();
         return this->*member_offset;
     }
 
     template<arm_reg REG>
-    requires requires { indirect_register_map.get(enum_constant<REG>{}); }
-    Xbyak::Address get_arm_reg(enum_constant<REG> reg)
+    requires (indirect_register_map::is_key_value<REG>)
+    Xbyak::Address get_arm_reg_indirect(enum_constant<REG>)
     {
-        const auto offset_in_ctx = indirect_register_map.get(reg);
+        const auto offset_in_ctx = indirect_register_map::get<REG>();
         return dword[CTX + offset_in_ctx];
     }
 
     void get_arm_reg(arm_reg reg, auto&& f)
     {
-        const auto handler_direct = OVERLOAD_ENUM_RESOLVER(get_arm_reg, reg, Xbyak::Reg32 (Converter::*)());
+        const auto handler_direct = OVERLOAD_ENUM_RESOLVER(get_arm_reg_direct, reg, Xbyak::Reg32 (Converter::*)());
         if(handler_direct)
+        {
             f(handler_direct(this));
+            return;
+        }
         
-        const auto handler_indirect = OVERLOAD_ENUM_RESOLVER(get_arm_reg, reg, Xbyak::Address (Converter::*)());
+        const auto handler_indirect = OVERLOAD_ENUM_RESOLVER(get_arm_reg_indirect, reg, Xbyak::Address (Converter::*)());
         if(handler_indirect)
+        {
             f(handler_indirect(this));
+            return;
+        }
 
+        REPORT_ERROR("unknown reg: {}", reg);
         std::unreachable();
     }
 
-    static constexpr inline auto condcode_jmp_map = OverloadList<ARMCC_CondCodes, void (Xbyak::CodeGenerator::*)(std::string, Xbyak::CodeGenerator::LabelType)>
-        ::with<ARMCC_EQ, &je>
-        ::with<ARMCC_NE, &jne>
-        ::with<ARMCC_MI, &js>
-        ::with<ARMCC_PL, &jns>
-        ::with<ARMCC_VS, &jo>
-        ::with<ARMCC_VC, &jno>
-        ::with<ARMCC_GE, &jge>
-        ::with<ARMCC_LT, &jl>
-        ::with<ARMCC_GT, &jg>
-        ::with<ARMCC_LE, &jle>
-        // WARNING: ARM carry flag is inverted compared to x86
-        // HS := C, LO := !C, HI := C && !Z, LS := !C || Z
-        // -> can't just "translate" the C usage into jc/jnc
-        // runtime has to set/get ARM flags register with C inverse of x86 flags
-        ::with<ARMCC_HS, &jae> // jae == jnc
-        ::with<ARMCC_LO, &jb> // jb == jc
-        ::with<ARMCC_HI, &ja>
-        ::with<ARMCC_LS, &jbe>
-        ::make();
-
-    template<ARMCC_CondCodes CC> requires (not one_of<enum_constant<CC>, ARMCC_AL, ARMCC_UNDEF, ARMCC_Invalid>)
-    void conditional_jump(std::string&& to_label, enum_constant<CC> cc)
+    using condcode_jmp_map = OverloadList<ARMCC_CondCodes, void (Xbyak::CodeGenerator::*)(std::string, Xbyak::CodeGenerator::LabelType)>
+    ::with<ARMCC_EQ, &Xbyak::CodeGenerator::je>
+    ::with<ARMCC_NE, &Xbyak::CodeGenerator::jne>
+    ::with<ARMCC_MI, &Xbyak::CodeGenerator::js>
+    ::with<ARMCC_PL, &Xbyak::CodeGenerator::jns>
+    ::with<ARMCC_VS, &Xbyak::CodeGenerator::jo>
+    ::with<ARMCC_VC, &Xbyak::CodeGenerator::jno>
+    ::with<ARMCC_GE, &Xbyak::CodeGenerator::jge>
+    ::with<ARMCC_LT, &Xbyak::CodeGenerator::jl>
+    ::with<ARMCC_GT, &Xbyak::CodeGenerator::jg>
+    ::with<ARMCC_LE, &Xbyak::CodeGenerator::jle>
+    // WARNING: ARM carry flag is inverted compared to x86
+    // HS := C, LO := !C, HI := C && !Z, LS := !C || Z
+    // -> can't just "translate" the C usage into jc/jnc
+    // runtime has to set/get ARM flags register with C inverse of x86 flags
+    ::with<ARMCC_HS, &Xbyak::CodeGenerator::jae> // jae == jnc
+    ::with<ARMCC_LO, &Xbyak::CodeGenerator::jb> // jb == jc
+    ::with<ARMCC_HI, &Xbyak::CodeGenerator::ja>
+    ::with<ARMCC_LS, &Xbyak::CodeGenerator::jbe>
+    ::type;
+    
+    template<ARMCC_CondCodes CC> requires (condcode_jmp_map::is_key_value<CC>)
+    void conditional_jump(enum_constant<CC> cc)
     {
-        (this->*(condcode_jmp_map.get(cc)))(std::forward<std::string>(to_label), T_NEAR);
+        (this->*(condcode_jmp_map::get<CC>()))(".fin", T_SHORT);
     }
 
     void append_instruction_header(const InstructionState& state)
@@ -525,23 +589,24 @@ private:
         if(state.arm.cc != ARMCC_UNDEF && state.arm.cc != ARMCC_AL)
         {
             // fmt::println("header: conditional {}", state.arm.cc);
-            const auto handler = OVERLOAD_ENUM_RESOLVER(conditional_jump, state.arm.cc, void (Converter::*)(std::string&&));
+            const auto handler = OVERLOAD_ENUM_RESOLVER(conditional_jump, state.arm.cc, void (Converter::*)());
             [[assume(handler != nullptr)]];
-            handler(this, ".fin");
+            handler(this);
         }
     }
 
     void write_arm_reg(const arm_reg dst_reg, const u32_t value)
     {
-        assert(dst_reg != ARM_REG_PC);
-        get_arm_reg(dst_reg, [&](auto dst) {
+        // writing to PC is fine here, used to know the PC at all
+        // should never use this for branching
+        get_arm_reg(dst_reg, [&](const auto& dst) {
             mov(dst, value);
         });
     }
     void write_arm_reg(const arm_reg dst_reg, const Xbyak::Operand& src)
     {
         assert(dst_reg != ARM_REG_PC);
-        get_arm_reg(dst_reg, [&](auto dst) {
+        get_arm_reg(dst_reg, [&](const auto& dst) {
             if(dst.isMEM() && src.isMEM())
             {
                 mov(r15d, src);
@@ -556,75 +621,87 @@ private:
     void write_arm_reg(const arm_reg dst_reg, const arm_reg src_reg)
     {
         assert(dst_reg != ARM_REG_PC);
-        get_arm_reg(src_reg, [&](auto src) {
+        get_arm_reg(src_reg, [&](const auto& src) {
             write_arm_reg(dst_reg, src);
         });
     }
 
-    void perform_indirect_branch_exchange(const Xbyak::Operand& src)
+    void perform_branch(const Offset<Kind::Absolute> addr, const cs_mode cpu_mode)
     {
-        fmt::println("TODO: {}", __func__);
+        const auto branch_target_label = make_label(*addr, cpu_mode);
+        DEBUG_BLOCK()
+        {
+            fmt::println("branch{} to {}", cpu_mode == get_cpu_mode() ? "" : "-exchange" , branch_target_label);
+        }
+
+        jmp(branch_target_label, T_NEAR);
     }
-    void perform_indirect_branch_exchange(const arm_reg src_reg)
+    void perform_branch(const Offset<Kind::Absolute> addr)
     {
-        get_arm_reg(src_reg, [&](auto src) {
-            perform_indirect_branch_exchange(src);
-        });
+        perform_branch(addr, get_cpu_mode());
+    }
+    void perform_branch_exchange(const Offset<Kind::Absolute> addr)
+    {
+        // 'BLX label' always changes mode
+        // TODO: set T flag in CPSR
+        perform_branch(addr, get_inv_cpu_mode());
     }
 
     void perform_indirect_branch(const Xbyak::Operand& src)
     {
-        fmt::println("TODO: {}", __func__);
+        fmt::println("TODO {}", __func__);
     }
     void perform_indirect_branch(const arm_reg src_reg)
     {
+        DEBUG_BLOCK()
+            fmt::println("branch on {}", src_reg);
+
         get_arm_reg(src_reg, [&](auto src) {
             perform_indirect_branch(src);
         });
     }
+    void perform_indirect_branch_exchange(const Xbyak::Operand& src)
+    {
+        fmt::println("TODO {}", __func__);
+    }
+    void perform_indirect_branch_exchange(const arm_reg src_reg)
+    {
+        DEBUG_BLOCK()
+            fmt::println("branch-exchange on {}", src_reg);
 
-    void instruction([[maybe_unused]] const InstructionState& state, enum_constant<ARM_INS_ALIAS_NOP>)
+        get_arm_reg(src_reg, [&](const auto& src) {
+            perform_indirect_branch_exchange(src);
+        });
+    }
+
+    HANDLE_INSN(ARM_INS_ALIAS_NOP)
     {
         // nop: do nothing
     }
 
-    bool validate(const InstructionState& state, enum_constant<ARM_INS_B>)
+    VALIDATE_INSN(ARM_INS_B)
     {
         const auto branch_target_abs = builder.make<Kind::Absolute>(state.ops[0].imm);
-        if(not branch_target_abs.in_code(4))
+        // 2 for Thumb, ARM is 4 but will always be aligned to it too, so 2-wide check is fine
+        if(not branch_target_abs.in_code(2))
             return false;
 
         return true;
     }
 
-    void instruction(const InstructionState& state, enum_constant<ARM_INS_B>)
+    HANDLE_INSN(ARM_INS_B)
     {
         const auto branch_target_abs = builder.make<Kind::Absolute>(state.ops[0].imm);
-        fmt::println("branch to 0x{:08x}", *branch_target_abs);
-        const auto branch_target_label = make_label(*branch_target_abs);
-        jmp(branch_target_label);
+        perform_branch(branch_target_abs);
     }
 
-    template<typename INSN> requires is_branch<INSN>
-    void instruction(const InstructionState& state, INSN)
+    HANDLE_INSN(ARM_INS_BX)
     {
-        if constexpr (is_insn<INSN, ARM_INS_B>)
-        {
-            const auto branch_target_abs = builder.make<Kind::Absolute>(state.ops[0].imm);
-            fmt::println("branch to 0x{:08x}", *branch_target_abs);
-            const auto branch_target_label = fmt::format("LA_x{:08x}", *branch_target_abs);
-            jmp(branch_target_label);
-        }
-        else
-        {
-            const auto branch_target_reg = arm_reg(state.ops[0].reg);
-            fmt::println("branch-exchange on {}", branch_target_reg);
-            perform_indirect_branch(branch_target_reg);
-        }
+        const auto branch_target_reg = arm_reg(state.ops[0].reg);
+        perform_indirect_branch_exchange(branch_target_reg);
     }
 
-    template<typename INSN> requires is_branch_with_link<INSN>
-    bool validate(const InstructionState& state, INSN)
+    VALIDATE_INSN_CONCEPT(INSN, is_branch_with_link<INSN>)
     {
         if(not op_is_a(state.ops[0], arm_op_type::ARM_OP_IMM))
         {
@@ -639,237 +716,217 @@ private:
         return true;
     }
 
-    template<typename INSN> requires one_of<INSN, ARM_INS_BL, ARM_INS_BLX>
-    void instruction(const InstructionState& state, INSN)
+    HANDLE_INSN_CONCEPT(INSN, is_branch_with_link<INSN>)
     {
+        DEBUG_BLOCK()
+            fmt::println("call, return after {}", state.addr_string);
+
         write_arm_reg(ARM_REG_LR, ARM_REG_PC);
 
         if(op_is_a(state.ops[0], arm_op_type::ARM_OP_IMM))
         {
             const auto branch_target_abs = builder.make<Kind::Absolute>(state.ops[0].imm);
             if constexpr (is_insn<INSN, ARM_INS_BL>)
-            {
-                fmt::println("call to 0x{:08x}", *branch_target_abs);
-                const auto branch_target_label = make_label(*branch_target_abs);
-                jmp(branch_target_label);
-            }
+                perform_branch(branch_target_abs);
             else 
-            {
-                const auto branch_target_label = make_label(*branch_target_abs, get_inv_cpu_mode());
-                fmt::println("call-exchange to 0x{:08x} ({} -> {})",
-                    *branch_target_abs,
-                    get_cpu_mode_str(get_cpu_mode()), get_cpu_mode_str(get_inv_cpu_mode()));
-                jmp(branch_target_label);
-            }
+                perform_branch_exchange(branch_target_abs);
         }
         else
         {
             const auto branch_target_reg = arm_reg(state.ops[0].reg);
-            fmt::println("call-exchange on {}", branch_target_reg);
             perform_indirect_branch_exchange(branch_target_reg);
         }
     }
-    
-    template<typename INSN> requires is_load_from_mem<INSN>
-    void instruction(const InstructionState& state, INSN)
-    {
 
-    }
-
-#define DUMMIFY_INSN(insn_type) \
-    void instruction(const InstructionState& state, enum_constant<ARM_INS_ ## insn_type>) { \
-        /* fmt::println("TODO @ 0x{:08x}: {}", state.arm_addr, state.insn); */ \
-        fmt::println("TODO {}", state.addr_string); \
-    }
-
-#define DUMMIFY_INSN_CONCEPT(concept_name) \
-    template<typename INSN> requires (concept_name<INSN>) \
-    void instruction(const InstructionState& state, INSN) { \
-        /* fmt::println("TODO @ 0x{:08x}: {}", state.arm_addr, state.insn); */ \
-        fmt::println("TODO {}", state.addr_string); \
-    }
+    // HANDLE_INSN_CONCEPT(INSN, is_load_from_mem<INSN>)
+    // {
+    //     PRINT_TODO_INSN(state);
+    // }
 
 #pragma region "Syscall"
-    DUMMIFY_INSN(SVC)
-    DUMMIFY_INSN(UDF)
+    void perform_syscall(const u8_t tag, const u32_t syscall_id)
+    {
+        mov(r15, (1ull << 63ull) | (u64_t(tag) << 55ull) | u64_t(syscall_id));
+        int3();
+    }
+    HANDLE_INSN(ARM_INS_SVC)
+    {
+        perform_syscall(1, state.ops[0].imm & 0xffff'ffffu);
+    }
+    HANDLE_INSN(ARM_INS_UDF)
+    {
+        perform_syscall(2, state.ops[0].imm & 0xffff'ffffu);
+    }
 #pragma endregion
 
 #pragma region "Coprocessor"
-    DUMMIFY_INSN(MCR)
-    DUMMIFY_INSN(MRC)
-    DUMMIFY_INSN(MRS)
-    DUMMIFY_INSN(MSR)
-    DUMMIFY_INSN(PLD)
+    DUMMY_INSN(MCR)
+    DUMMY_INSN(MRC)
+    DUMMY_INSN(MRS)
+    DUMMY_INSN(MSR)
+    DUMMY_INSN(PLD)
 #pragma endregion
 
 #pragma region "Bitwise"
-    DUMMIFY_INSN(BIC)
-    DUMMIFY_INSN(AND)
-    DUMMIFY_INSN(ORR)
-    DUMMIFY_INSN(EOR)
-    DUMMIFY_INSN(CLZ)
+    DUMMY_INSN(BIC)
+    DUMMY_INSN(AND)
+    DUMMY_INSN(ORR)
+    DUMMY_INSN(EOR)
+    DUMMY_INSN(CLZ)
 #pragma endregion
 
 #pragma region "Logic"
-    DUMMIFY_INSN(CMP)
-    DUMMIFY_INSN(CMN)
-    DUMMIFY_INSN(TST)
-    DUMMIFY_INSN(TEQ)
+    DUMMY_INSN(CMP)
+    DUMMY_INSN(CMN)
+    DUMMY_INSN(TST)
+    DUMMY_INSN(TEQ)
 #pragma endregion
 
 #pragma region "Arithmetic"
-    DUMMIFY_INSN(ADD)
-    DUMMIFY_INSN(ADC)
+    DUMMY_INSN(ADD)
+    DUMMY_INSN(ADC)
 
-    DUMMIFY_INSN(SUB)
-    DUMMIFY_INSN(SBC)
+    DUMMY_INSN(SUB)
+    DUMMY_INSN(SBC)
 
-    DUMMIFY_INSN(RSB)
-    DUMMIFY_INSN(RSC)
+    DUMMY_INSN(RSB)
+    DUMMY_INSN(RSC)
 #pragma endregion
 
 #pragma region "Saturate"
-    DUMMIFY_INSN(SSAT)
-    DUMMIFY_INSN(SSAT16)
-    DUMMIFY_INSN(USAT)
-    DUMMIFY_INSN(USAT16)
+    DUMMY_INSN(SSAT)
+    DUMMY_INSN(SSAT16)
+    DUMMY_INSN(USAT)
+    DUMMY_INSN(USAT16)
+    DUMMY_INSN(QADD)
+    DUMMY_INSN(QDADD)
+    DUMMY_INSN(QSUB)
+    DUMMY_INSN(QDSUB)
 #pragma endregion
 
 #pragma region "Sum of Absolute Differences"
-    DUMMIFY_INSN(USAD8)
-    DUMMIFY_INSN(USADA8)
+    DUMMY_INSN(USAD8)
+    DUMMY_INSN(USADA8)
 #pragma endregion
-
-#define DUMMIFY_PARALLEL_PREFIX(prefix) \
-    DUMMIFY_INSN(prefix ## ADD8) \
-    DUMMIFY_INSN(prefix ## ADD16) \
-    DUMMIFY_INSN(prefix ## SUB8) \
-    DUMMIFY_INSN(prefix ## SUB16) \
-    DUMMIFY_INSN(prefix ## ASX) \
-    DUMMIFY_INSN(prefix ## SAX)
 
 #pragma region "Parallel signed"
-    DUMMIFY_PARALLEL_PREFIX(S)
+    DUMMY_INSN_CONCEPT(is_parallel_arithmetic_signed)
 #pragma endregion
 #pragma region "Parallel signed saturating"
-    DUMMIFY_INSN(QADD)
-    DUMMIFY_INSN(QDADD)
-    DUMMIFY_INSN(QSUB)
-    DUMMIFY_INSN(QDSUB)
-    DUMMIFY_PARALLEL_PREFIX(Q)
+    DUMMY_INSN_CONCEPT(is_parallel_arithmetic_signed_saturating)
 #pragma endregion
 #pragma region "Parallel signed halving"
-    DUMMIFY_PARALLEL_PREFIX(SH)
+    DUMMY_INSN_CONCEPT(is_parallel_arithmetic_signed_halving)
 #pragma endregion
 
 #pragma region "Parallel unsigned"
-    DUMMIFY_PARALLEL_PREFIX(U)
+    DUMMY_INSN_CONCEPT(is_parallel_arithmetic_unsigned)
 #pragma endregion
 #pragma region "Parallel unsigned saturating"
-    DUMMIFY_PARALLEL_PREFIX(UQ)
+    DUMMY_INSN_CONCEPT(is_parallel_arithmetic_unsigned_saturating)
 #pragma endregion
 #pragma region "Parallel unsigned halving"
-    DUMMIFY_PARALLEL_PREFIX(UH)
+    DUMMY_INSN_CONCEPT(is_parallel_arithmetic_unsigned_halving)
 #pragma endregion
 
 #pragma region "Move"
-    DUMMIFY_INSN(MOV)
-    DUMMIFY_INSN(MVN)
+    DUMMY_INSN(MOV)
+    DUMMY_INSN(MVN)
 #pragma endregion
 
 #pragma region "Sign extend"
-    DUMMIFY_INSN(SXTB)
-    DUMMIFY_INSN(SXTB16)
-    DUMMIFY_INSN(SXTH)
+    DUMMY_INSN(SXTB)
+    DUMMY_INSN(SXTB16)
+    DUMMY_INSN(SXTH)
 #pragma endregion
 
 #pragma region "Sign extend with add"
-    DUMMIFY_INSN(SXTAB)
-    DUMMIFY_INSN(SXTAB16)
-    DUMMIFY_INSN(SXTAH)
+    DUMMY_INSN(SXTAB)
+    DUMMY_INSN(SXTAB16)
+    DUMMY_INSN(SXTAH)
 #pragma endregion
 
 #pragma region "Zero extend"
-    DUMMIFY_INSN(UXTB)
-    DUMMIFY_INSN(UXTB16)
-    DUMMIFY_INSN(UXTH)
+    DUMMY_INSN(UXTB)
+    DUMMY_INSN(UXTB16)
+    DUMMY_INSN(UXTH)
 #pragma endregion
 
 #pragma region "Zero extend with add"
-    DUMMIFY_INSN(UXTAB)
-    DUMMIFY_INSN(UXTAB16)
-    DUMMIFY_INSN(UXTAH)
+    DUMMY_INSN(UXTAB)
+    DUMMY_INSN(UXTAB16)
+    DUMMY_INSN(UXTAH)
 #pragma endregion
 
 #pragma region "Packing"
-    DUMMIFY_INSN(SEL)
-    DUMMIFY_INSN(PKHBT)
-    DUMMIFY_INSN(PKHTB)
+    DUMMY_INSN(SEL)
+    DUMMY_INSN(PKHBT)
+    DUMMY_INSN(PKHTB)
 #pragma endregion
 
 #pragma region "Reverse"
-    DUMMIFY_INSN(REV)
-    DUMMIFY_INSN(REV16)
-    DUMMIFY_INSN(REVSH)
+    DUMMY_INSN(REV)
+    DUMMY_INSN(REV16)
+    DUMMY_INSN(REVSH)
 #pragma endregion
 
 #pragma region "Exclusive"
-    DUMMIFY_INSN(CLREX)
+    DUMMY_INSN(CLREX)
 
-    DUMMIFY_INSN(LDREXB)
-    DUMMIFY_INSN(LDREXH)
-    DUMMIFY_INSN(LDREX)
-    DUMMIFY_INSN(LDREXD)
+    DUMMY_INSN(LDREXB)
+    DUMMY_INSN(LDREXH)
+    DUMMY_INSN(LDREX)
+    DUMMY_INSN(LDREXD)
 
-    DUMMIFY_INSN(STREXB)
-    DUMMIFY_INSN(STREXH)
-    DUMMIFY_INSN(STREX)
-    DUMMIFY_INSN(STREXD)
+    DUMMY_INSN(STREXB)
+    DUMMY_INSN(STREXH)
+    DUMMY_INSN(STREX)
+    DUMMY_INSN(STREXD)
 #pragma endregion
 
 #pragma region "Multiply"
-    DUMMIFY_INSN(MUL)
-    DUMMIFY_INSN(MLA)
+    DUMMY_INSN(MUL)
+    DUMMY_INSN(MLA)
 
-    DUMMIFY_INSN_CONCEPT(is_special_mul)
+    DUMMY_INSN_CONCEPT(is_special_mul)
 #pragma endregion
 
 #pragma region "Vector"
-    DUMMIFY_INSN(VADD)
-    DUMMIFY_INSN(VSUB)
-    DUMMIFY_INSN(VDIV)
+    DUMMY_INSN(VADD)
+    DUMMY_INSN(VSUB)
+    DUMMY_INSN(VDIV)
     
-    DUMMIFY_INSN(VMUL)
-    DUMMIFY_INSN(VNMUL)
-    DUMMIFY_INSN(VMLA)
-    DUMMIFY_INSN(VMLS)
-    DUMMIFY_INSN(VNMLA)
-    DUMMIFY_INSN(VNMLS)
+    DUMMY_INSN(VMUL)
+    DUMMY_INSN(VNMUL)
+    DUMMY_INSN(VMLA)
+    DUMMY_INSN(VMLS)
+    DUMMY_INSN(VNMLA)
+    DUMMY_INSN(VNMLS)
 
-    DUMMIFY_INSN(VNEG)
-    DUMMIFY_INSN(VABS)
-    DUMMIFY_INSN(VSQRT)
+    DUMMY_INSN(VNEG)
+    DUMMY_INSN(VABS)
+    DUMMY_INSN(VSQRT)
 
-    DUMMIFY_INSN(VMOV)
-    DUMMIFY_INSN(VCVT)
+    DUMMY_INSN(VMOV)
+    DUMMY_INSN(VCVT)
 
-    DUMMIFY_INSN(VCMP)
-    DUMMIFY_INSN(VCMPE)
-    DUMMIFY_INSN(VMSR)
-    DUMMIFY_INSN(VMRS)
+    DUMMY_INSN(VCMP)
+    DUMMY_INSN(VCMPE)
+    DUMMY_INSN(VMSR)
+    DUMMY_INSN(VMRS)
     
-    DUMMIFY_INSN(VLDR)
-    DUMMIFY_INSN(VLDMIA)
-    DUMMIFY_INSN(VLDMDB)
+    DUMMY_INSN(VLDR)
+    DUMMY_INSN(VLDMIA)
+    DUMMY_INSN(VLDMDB)
     
-    DUMMIFY_INSN(VSTR)
-    DUMMIFY_INSN(VSTMIA)
-    DUMMIFY_INSN(VSTMDB)
+    DUMMY_INSN(VSTR)
+    DUMMY_INSN(VSTMIA)
+    DUMMY_INSN(VSTMDB)
 #pragma endregion
 
 };
 
-static void convert_arm(Converter& conv, const Program& program, cs_mode cpu_mode)
+static void convert_arm(Converter& conv, const Program& program, cs_mode cpu_mode, const int step_size)
 {
     Handle_csh handle_ptr{CS_ARCH_ARM, cpu_mode};
     csh handle = handle_ptr.handle;
@@ -895,18 +952,7 @@ static void convert_arm(Converter& conv, const Program& program, cs_mode cpu_mod
 
         conv.append_instruction(insn);
 
-        const s64_t next_address = [&] {
-            /*
-            if(insn.address == address_init && insn.id == ARM_INS_B && insn.detail && insn.detail->arm.cc == ARMCC_CondCodes::ARMCC_AL)
-            {
-                // homebrew. skip metadata.
-                fmt::println("homebrew init, skip to branch dest");
-                return insn.detail->arm.operands[0].imm;
-            }
-            else
-            */
-                return insn.address + insn.size;
-        }();
+        const s64_t next_address = insn.address + step_size;
         const u64_t address_offset = next_address - address_init;
         code_ptr = code_ptr_init + address_offset;
         code_size = code_size_init - address_offset;
@@ -919,8 +965,9 @@ static void convert(const Program& program, [[maybe_unused]] const std::string& 
     // estimate number of x64 bytes per 1 ARM instruction (4 bytes)
     std::vector<u8_t> out_bytes(std::size_t(program.code_sec.length() * Converter::INSN_RESERVED_SIZE / 4), u8_t());
     Converter conv(program, out_bytes);
-    convert_arm(conv, program, CS_MODE_ARM);
-    convert_arm(conv, program, CS_MODE_THUMB);
+    convert_arm(conv, program, CS_MODE_ARM, 4);
+    // try all 16-bit values in the program, to avoid seemingly-code constant pools making us skip an instruction
+    convert_arm(conv, program, CS_MODE_THUMB, 2);
     out_bytes.resize(conv.getSize());
 }
 

@@ -7,16 +7,7 @@
 #include <fmt/ranges.h>
 #include <fmt/std.h>
 
-#define MAGIC_ENUM_ENABLE_HASH
-#define MAGIC_ENUM_RANGE_MIN -256
-#define MAGIC_ENUM_RANGE_MAX 256
-#include <magic_enum/magic_enum.hpp>
-
-#define ENUM_FORMATTER_RANGE(enum_type, lower, higher) \
-template <> struct magic_enum::customize::enum_range<enum_type> { \
-  static constexpr int min = lower; \
-  static constexpr int max = higher; \
-};
+#include "../magic_enum_inc.h"
 
 template<class T>
 concept is_enum = std::is_enum_v<T>;
@@ -38,5 +29,5 @@ struct base_enum_format {
     }
 };
 
-#define ENUM_FORMATTER_BASE(enum_type) \
-template <> struct fmt::formatter<enum_type> : base_enum_format<enum_type>, skip_flags_parse { };
+template <typename enum_type> requires is_enum<enum_type>
+struct fmt::formatter<enum_type> : base_enum_format<enum_type>, skip_flags_parse { };

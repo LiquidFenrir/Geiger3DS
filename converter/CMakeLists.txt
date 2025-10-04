@@ -8,16 +8,18 @@ target_compile_options(converter PRIVATE
     -Wno-unused-parameter
     # -Wno-unused-variable
     # -Wno-unused-but-set-variable
-
+    
+    $<$<PLATFORM_ID:Windows>:-Wa,-mbig-obj>
+    
     # C++ specific options
     $<$<COMPILE_LANGUAGE:CXX>:-fexceptions -frtti>
-    $<$<COMPILE_LANGUAGE:CXX>:-ftemplate-depth=1600>
-    $<$<COMPILE_LANGUAGE:CXX>:-fconcepts-diagnostics-depth=2>
+    $<$<COMPILE_LANGUAGE:CXX>:-ftemplate-depth=1400>
+    # $<$<COMPILE_LANGUAGE:CXX>:-fconcepts-diagnostics-depth=2>
 )
 target_link_libraries(converter PRIVATE -static
     arm-context # cpu struct headers
     capstone # disassembler library
-    fmt
+    fmt::fmt-header-only
     magic_enum
     xbyak
 )
