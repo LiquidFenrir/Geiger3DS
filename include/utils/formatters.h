@@ -1,11 +1,17 @@
 #pragma once
 
 #include "formatters_base.h"
-#include "arm_info.h"
+
+extern "C" {
+#include <typedefs.h>
+
+#include <capstone/platform.h>
+#include <capstone/capstone.h>
+}
 
 #define ENUM_FORMATTER_CS(enum_type) \
 template <> struct fmt::formatter<enum_type> : skip_flags_parse { \
-    format_context::iterator format(const enum_type& value, format_context& ctx) const { \
+    format_context::iterator format(const enum_type value, format_context& ctx) const { \
         constexpr size_t prefix_length = magic_enum::enum_name<static_cast<enum_type>(0)>().size() - 7; /* 0 -> ..._INVALID */ \
         return fmt::format_to(ctx.out(), "{}", magic_enum::enum_name<enum_type>(value).substr(prefix_length)); \
     } \
@@ -18,6 +24,13 @@ ENUM_FORMATTER_CS(arm_reg)
 ENUM_FORMATTER_RANGE(arm_insn, 0, ARM_INS_ALIAS_END)
 ENUM_FORMATTER_CS(arm_insn)
 ENUM_FORMATTER_CS(arm_shifter)
+
+template <> struct fmt::formatter<ARMCC_CondCodes> : skip_flags_parse {
+    format_context::iterator format(const ARMCC_CondCodes value, format_context& ctx) const {
+        constexpr size_t prefix_length = std::size("ARMCC_") - 1;
+        return fmt::format_to(ctx.out(), "{}", magic_enum::enum_name<ARMCC_CondCodes>(value).substr(prefix_length));
+    }
+};
 
 template <> struct fmt::formatter<decltype(cs_arm_op::shift)> : skip_flags_parse {
     format_context::iterator format(const auto& shift, format_context& ctx) const
@@ -41,10 +54,20 @@ template <> struct fmt::formatter<cs_insn> : skip_flags_parse {
     {
         auto it = ctx.out();
         it = fmt::format_to(it, "insn(");
-        it = fmt::format_to(it, "id={} ({}), ", insn.id, (arm_insn)insn.id);
+        it = fmt::format_to(it, "id={} [{}], ", (arm_insn)insn.id, insn.id);
         if(insn.is_alias && insn.alias_id != (u64_t)-1)
         {
-            it = fmt::format_to(it, "alias_id={} ({}), ", insn.id, (arm_insn)insn.alias_id);
+            it = fmt::format_to(it, "alias_id={} [{}], ", (arm_insn)insn.alias_id, insn.alias_id);
+        }
+
+        const auto& arm = insn.detail->arm;
+        if(arm.cc != ARMCC_UNDEF && arm.cc != ARMCC_AL)
+        {
+            it = fmt::format_to(it, "cc={}, ", arm.cc);
+        }
+        if(arm.update_flags)
+        {
+            it = fmt::format_to(it, "setflags=yes, ");
         }
 
         return fmt::format_to(it, "text=\"{}{}{}\")", insn.mnemonic, insn.op_str[0] == '\0' ? "" : " ", insn.op_str);

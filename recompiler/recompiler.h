@@ -1,7 +1,7 @@
 #pragma once
 
-#include "utils/program.h"
-#include "utils/visits.h"
+#include <utils/program.h>
+#include <utils/visits.h>
 
 namespace recompiler {
 

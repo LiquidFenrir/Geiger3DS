@@ -1,7 +1,9 @@
 #pragma once
 
 #include <typedefs.h>
+#include <algorithm>
 #include "section.h"
+#include "formatters_base.h"
 
 namespace recompiler {
 
@@ -57,3 +59,16 @@ struct Program {
 };
 
 }
+
+template <> struct fmt::formatter<recompiler::Program> : skip_flags_parse {
+    format_context::iterator format(const recompiler::Program& program, format_context& ctx) const
+    {
+        return fmt::format_to(ctx.out(), "Program(code @ 0x{:08x}, rodata @ 0x{:08x}, data @ 0x{:08x}, bss @ 0x{:08x}-0x{:08x})",
+            program.code_sec.start_addr,
+            program.rodata_sec.start_addr,
+            program.data_sec.start_addr,
+            program.data_sec.end_addr,
+            program.data_sec.end_addr + program.bss_size
+        );
+    }
+};

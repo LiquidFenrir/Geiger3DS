@@ -7,8 +7,9 @@
 #include <fmt/ranges.h>
 #include <fmt/std.h>
 
-#define MAGIC_ENUM_RANGE_MIN -512
-#define MAGIC_ENUM_RANGE_MAX 511
+#define MAGIC_ENUM_ENABLE_HASH
+#define MAGIC_ENUM_RANGE_MIN -256
+#define MAGIC_ENUM_RANGE_MAX 256
 #include <magic_enum/magic_enum.hpp>
 
 #define ENUM_FORMATTER_RANGE(enum_type, lower, higher) \

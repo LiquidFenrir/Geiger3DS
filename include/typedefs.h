@@ -1,6 +1,6 @@
 #pragma once
 
-#ifndef __cplusplus
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -20,6 +20,6 @@ typedef int16_t s16_t;
 typedef int32_t s32_t;
 typedef int64_t s64_t;
 
-#ifndef __cplusplus
+#ifdef __cplusplus
 }
 #endif

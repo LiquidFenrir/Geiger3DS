@@ -1,15 +1,17 @@
 #include <bitset>
 #include <compare>
 #include <utility>
+#include <algorithm>
 #include <tuple>
 #include <span>
 
 #include "recompiler.h"
-#include "utils/formatters.h"
-#include "utils/bounds.h"
-#include "utils/offsets.h"
-#include "utils/fuzzy.h"
-#include "utils/scope.h"
+#include <utils/arm_info.h>
+#include <utils/formatters.h>
+#include <utils/bounds.h>
+#include <utils/offsets.h>
+#include <utils/fuzzy.h>
+#include <utils/scope.h>
 
 namespace p {
 
@@ -36,93 +38,19 @@ namespace null {
 #define println(...) println_to(stderr, __VA_ARGS__)
 
 using namespace recompiler;
+namespace ranges = std::ranges;
 
-template <> struct fmt::formatter<recompiler::Program> : skip_flags_parse {
-    format_context::iterator format(const recompiler::Program& program, format_context& ctx) const
-    {
-        return fmt::format_to(ctx.out(), "Program(code @ 0x{:08x}, rodata @ 0x{:08x}, data @ 0x{:08x}, bss @ 0x{:08x}-0x{:08x})",
-            program.code_sec.start_addr,
-            program.rodata_sec.start_addr,
-            program.data_sec.start_addr,
-            program.data_sec.end_addr,
-            program.data_sec.end_addr + program.bss_size
-        );
-    }
-};
-
-constexpr bool find_in(const auto& r, auto&& v)
-{
-    return std::find(std::begin(r), std::end(r), v) != std::end(r);
-}
-constexpr bool find_in(const auto& r, auto&& v, auto&& accessor)
-{
-    return std::find_if(std::begin(r), std::end(r), [&](const auto& cv) {
-        return accessor(cv) == v;
-    }) != std::end(r);
-}
-constexpr int str_access_size(arm_insn id)
-{
-    switch(id)
-    {
-    case ARM_INS_STRB:
-    case ARM_INS_STRBT:
-    case ARM_INS_STREXB:
-        return 1;
-    case ARM_INS_STRH:
-    case ARM_INS_STRHT:
-    case ARM_INS_STREXH:
-        return 2;
-    case ARM_INS_STR:
-    case ARM_INS_STRT:
-    case ARM_INS_STREX:
-        return 4;
-    case ARM_INS_STRD:
-    case ARM_INS_STREXD:
-        return 8;
-    default:
-        assert(0);
-    }
-}
-constexpr int ldr_access_size(arm_insn id)
-{
-    switch(id)
-    {
-    case ARM_INS_LDRB:
-    case ARM_INS_LDRBT:
-    case ARM_INS_LDRSB:
-    case ARM_INS_LDRSBT:
-    case ARM_INS_LDREXB:
-        return 1;
-    case ARM_INS_LDRH:
-    case ARM_INS_LDRHT:
-    case ARM_INS_LDRSH:
-    case ARM_INS_LDRSHT:
-    case ARM_INS_LDREXH:
-        return 2;
-    case ARM_INS_LDR:
-    case ARM_INS_LDRT:
-    case ARM_INS_LDREX:
-        return 4;
-    case ARM_INS_LDRD:
-    case ARM_INS_LDREXD:
-        return 8;
-    default:
-        assert(0);
-    }
-}
-
-[[maybe_unused]] static bool op_is(const cs_arm_op& op, arm_reg reg)
-{
-    return op.type == ARM_OP_REG && op.reg == reg;
-}
-[[maybe_unused]] static bool op_is(const cs_arm_op& op, int64_t imm)
-{
-    return op.type == ARM_OP_IMM && op.reg == imm;
-}
-[[maybe_unused]] static bool op_is_a(const cs_arm_op& op, arm_op_type type)
-{
-    return op.type == type;
-}
+// find_if
+// constexpr bool ranges::contains(const auto& r, auto&& v)
+// {
+//     return std::find(std::begin(r), std::end(r), v) != std::end(r);
+// }
+// constexpr bool ranges::contains(const auto& r, auto&& v, auto&& accessor)
+// {
+//     return std::find_if(std::begin(r), std::end(r), [&](const auto& cv) {
+//         return accessor(cv) == v;
+//     }) != std::end(r);
+// }
 
 enum class BranchSource : u8_t {
     None,
@@ -741,7 +669,7 @@ VisitTagged analysis(const Program& program)
             };
             for(const u8_t not_allowed : not_allowed_groups)
             {
-                if(find_in(grps, not_allowed))
+                if(ranges::contains(grps, not_allowed))
                 {
                     metadata.reachable = Fuzzy::No;
                     metadata.is_code = Fuzzy::No;
@@ -792,9 +720,9 @@ VisitTagged analysis(const Program& program)
             if(metadata.is_code == Fuzzy::No)
                 return;
 
-            const bool current_is_branch_reg = find_in(regs_write, (u16_t)ARM_REG_PC);
-            const bool current_is_branch_grp = find_in(grps, (u8_t)ARM_GRP_JUMP);
-            const bool current_is_call_grp = find_in(grps, (u8_t)ARM_GRP_CALL);
+            const bool current_is_branch_reg = ranges::contains(regs_write, (u16_t)ARM_REG_PC);
+            const bool current_is_branch_grp = ranges::contains(grps, (u8_t)ARM_GRP_JUMP);
+            const bool current_is_call_grp = ranges::contains(grps, (u8_t)ARM_GRP_CALL);
 
             bool current_is_branch = current_is_branch_reg | current_is_branch_grp | current_is_call_grp;
             if(!current_is_branch)
@@ -1008,7 +936,7 @@ VisitTagged analysis(const Program& program)
                     // println("Pop alias @ 0x{:08x}: {}", *insn_addr, insn);
                     // println("ops: {}", ops);
                     // pop with sp in list is nonsense
-                    // if(find_in(ops.subspan(1), (u16_t)ARM_REG_SP))
+                    // if(ranges::contains(ops.subspan(1), (u16_t)ARM_REG_SP))
                     //     failed_detection();
                 }
                 else
@@ -1125,7 +1053,7 @@ VisitTagged analysis(const Program& program)
                     failed_detection();
                 // with writeback, base may only appear in the reglist if it is the lowest-numbered register
                 // reglist decoded is ordered, so base being the lowest means it's at position 1 as well as 0
-                else if(detail->writeback && find_in(ops.subspan(1), ops[0].reg, [](const cs_arm_op& op) {
+                else if(detail->writeback && ranges::contains(ops.subspan(1), ops[0].reg, [](const cs_arm_op& op) {
                     return op.reg;
                 }) && ops[0].reg > ops[1].reg)
                     failed_detection();
@@ -1215,7 +1143,7 @@ VisitTagged analysis(const Program& program)
                 if(ops[0].reg == ARM_REG_PC)
                     failed_detection();
                 // with writeback, base may not appear in the reglist
-                else if(detail->writeback && find_in(ops.subspan(1), ops[0].reg, [](const cs_arm_op& op) {
+                else if(detail->writeback && ranges::contains(ops.subspan(1), ops[0].reg, [](const cs_arm_op& op) {
                     return op.reg;
                 }))
                     failed_detection();

@@ -58,7 +58,7 @@ int main(int argc, char** argv)
 
     const auto before_time = std::chrono::steady_clock::now();
     recompiler::Program prog(sec_code, sec_rodata, sec_data, code_addr, bss_size);
-    analysis(prog);
+    recompiler::analysis(prog);
     const auto after_time = std::chrono::steady_clock::now();
     const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(after_time - before_time);
     fmt::println("Time taken: (Analysis) {}", dur);

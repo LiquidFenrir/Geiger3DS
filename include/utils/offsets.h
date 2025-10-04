@@ -18,12 +18,17 @@ struct OffsetTranslator;
 
 template<Kind K>
 class Offset {
-    friend OffsetTranslator;
+    friend struct OffsetTranslator;
     const OffsetTranslator* parent;
     u32_t value;
 
 public:
     static constexpr inline Kind kind = K;
+
+    const OffsetTranslator* get_parent() const noexcept
+    {
+        return parent;
+    }
 
     // read the value contained
     u32_t operator*() const noexcept
@@ -51,25 +56,7 @@ public:
     }
 
     template<Kind Kout>
-    Offset<Kout> to() const noexcept
-    {
-        // shortcut
-        if constexpr (Kout == K) return *this;
-
-        auto out_value = value;
-
-        if constexpr (K == Kind::Absolute) out_value -= parent->program.code_sec.start_addr;
-        if constexpr (K > Kind::RelativeThumb) out_value *= 2;
-        if constexpr (K > Kind::RelativeByte) out_value *= 2;
-
-        // out_value is a relative byte offset
-
-        if constexpr (Kout > Kind::RelativeByte) out_value /= 2; // relative thumb offset
-        if constexpr (Kout > Kind::RelativeThumb) out_value /= 2; // relative arm offset
-        if constexpr (Kout == Kind::Absolute) out_value += parent->program.code_sec.start_addr; // absolute byte offset
-
-        return Offset<Kout>(parent, out_value);
-    }
+    Offset<Kout> to() const noexcept;
 
     /*
     copy constructor
@@ -77,10 +64,7 @@ public:
     */
     template<Kind Kin>
     Offset(const Offset<Kin>& in) noexcept
-        : Offset(in.parent, in.template get<K>())
-    { }
-    Offset(const Offset<K>& in) noexcept
-        : Offset(in.parent, in.value)
+        : Offset(in.get_parent(), in.template get<K>())
     { }
 
     /*
@@ -90,14 +74,8 @@ public:
     template<Kind Kin>
     Offset& operator=(const Offset<Kin>& in) noexcept
     {
-        parent = in.parent;
+        parent = in.get_parent();
         value = in.template get<K>();
-        return *this;
-    }
-    Offset& operator=(const Offset<K>& in) noexcept
-    {
-        parent = in.parent;
-        value = in.value;
         return *this;
     }
 
@@ -125,23 +103,15 @@ public:
         return out;
     }
 
-    bool valid(u32_t length = 0) const noexcept
-    {
-        const auto absolute = to<Kind::Absolute>();
-        return parent->program.is_in(*absolute, length);
-    }
-    bool in_code(u32_t length = 0) const noexcept
-    {
-        const auto absolute = to<Kind::Absolute>();
-        return parent->program.code_sec.is_in(*absolute, length);
-    }
+    bool valid(u32_t length = 0) const noexcept;
+    bool in_code(u32_t length = 0) const noexcept;
 
     Offset() = delete;
-    
+
     template<Kind Kin>
     bool sibling(const Offset<Kin>& in) const noexcept
     {
-        return parent == in.parent;
+        return parent == in.get_parent();
     }
     
     // const OffsetTranslator* parent;
@@ -174,6 +144,41 @@ struct OffsetTranslator {
         : program(program_in)
     { }
 };
+
+template<Kind K>
+template<Kind Kout>
+Offset<Kout> Offset<K>::to() const noexcept
+{
+    // shortcut
+    if constexpr (Kout == K) return *this;
+
+    auto out_value = value;
+
+    if constexpr (K == Kind::Absolute) out_value -= parent->program.code_sec.start_addr;
+    else if constexpr (K == Kind::RelativeArm) out_value *= 4;
+    else if constexpr (K == Kind::RelativeThumb) out_value *= 2;
+
+    // out_value is a relative byte offset
+
+    if constexpr (Kout == Kind::Absolute) out_value += parent->program.code_sec.start_addr; // absolute byte offset
+    else if constexpr (Kout == Kind::RelativeArm) out_value /= 4; // relative arm offset
+    else if constexpr (Kout  == Kind::RelativeThumb) out_value /= 2; // relative thumb offset
+
+    return parent->make<Kout>(out_value);
+}
+
+template<Kind K>
+bool Offset<K>::valid(u32_t length) const noexcept
+{
+    const auto absolute = to<Kind::Absolute>();
+    return parent->program.is_in(*absolute, length);
+}
+template<Kind K>
+bool Offset<K>::in_code(u32_t length) const noexcept
+{
+    const auto absolute = to<Kind::Absolute>();
+    return parent->program.code_sec.is_in(*absolute, length);
+}
 
 template<Kind KL, Kind KR>
 inline std::partial_ordering operator<=>(const Offset<KL>& lhs, const Offset<KR>& rhs)

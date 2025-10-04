@@ -1,6 +1,6 @@
 set(PROJECT_NAME recompiler)
 add_executable(recompiler)
-target_compile_features(recompiler PUBLIC cxx_std_20 c_std_23)
+target_compile_features(recompiler PUBLIC cxx_std_23)
 target_compile_options(recompiler PRIVATE
     # Common C/C++ options
     -Wall -Wextra -Wno-psabi
@@ -13,7 +13,7 @@ target_compile_options(recompiler PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-fexceptions -frtti>
 )
 target_link_libraries(recompiler PRIVATE -static
-    arm-context # cpu struct headers
+    arm-context-embed # cpu struct headers with string form
     capstone # disassembler library
     fmt
     magic_enum
@@ -22,5 +22,4 @@ target_sources(recompiler PRIVATE
     # ${CMAKE_CURRENT_SOURCE_DIR}/recompiler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/recompiler_split.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/recompiler_analysis.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/embed_header.c
 )

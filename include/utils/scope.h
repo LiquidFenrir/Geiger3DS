@@ -6,7 +6,7 @@ namespace recompiler {
 
 template<typename F>
 struct OnExitScope {
-    F&& f;
+    F f;
     ~OnExitScope()
     {
         f();
